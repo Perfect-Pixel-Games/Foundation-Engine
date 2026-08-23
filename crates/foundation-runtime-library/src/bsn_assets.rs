@@ -6,13 +6,17 @@
 //! loader.
 
 use bevy::{
-    asset::{AssetEvent, AssetPath, AssetServer, Handle},
+    asset::{AssetEvent, AssetId, AssetPath, AssetServer, Handle},
     ecs::hierarchy::ChildOf,
     prelude::*,
     scene::{ResolvedSceneRoot, ScenePatch},
 };
 
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use crate::{
     dynamic_bsn::DynamicBsnLoader,
@@ -34,6 +38,7 @@ impl Plugin for FoundationBsnAssetPlugin {
         // intentionally registered from one isolated Foundation plugin.
         app.init_asset_loader::<DynamicBsnLoader>()
             .init_resource::<FoundationBsnSceneRegistry>()
+            .init_resource::<FoundationBsnSelfResolveSuppression>()
             .register_type::<FoundationBsnInstance>()
             .add_systems(
                 Update,
@@ -90,6 +95,57 @@ impl FoundationBsnSceneRegistry {
             .into_iter()
             .filter(|registered_scene_key| registered_scene_key.contains(scene_key_search_text))
             .collect()
+    }
+}
+
+/// Suppresses `AssetEvent::Modified` events Foundation expects to see from its
+/// own `ScenePatch` resolve-caching writes, so [`replace_reloaded_bsn_instances`]
+/// can tell those apart from a genuine on-disk edit.
+///
+/// [`apply_pending_bsn_instances`] mutates a `ScenePatch` asset in place (via
+/// `Assets::get_mut`) purely to cache its resolved form, and Bevy's asset
+/// server performs further internal bookkeeping while finishing a fresh load.
+/// Bevy has no event variant distinguishing "this asset was mutated by its own
+/// consumer" from "the source file changed on disk" — both surface as
+/// `AssetEvent::Modified`, and the exact number of self-inflicted events per
+/// load is an internal implementation detail Foundation cannot enumerate
+/// precisely. Without this suppression, every instance would despawn and
+/// re-resolve itself shortly after applying, forever, since resolving the
+/// replacement retriggers the same self-inflicted events.
+///
+/// Rather than counting exact events, this tracks a short grace window after
+/// Foundation's own resolve during which `Modified` events for that asset are
+/// assumed self-inflicted. A real edit landing in that window only costs one
+/// missed hot-reload, which is a far better tradeoff than an unbounded
+/// despawn/respawn loop.
+#[derive(Debug, Resource)]
+struct FoundationBsnSelfResolveSuppression {
+    suppressed_until: HashMap<AssetId<ScenePatch>, Instant>,
+    suppression_window: Duration,
+}
+
+impl Default for FoundationBsnSelfResolveSuppression {
+    fn default() -> Self {
+        Self {
+            suppressed_until: HashMap::new(),
+            suppression_window: Duration::from_millis(500),
+        }
+    }
+}
+
+impl FoundationBsnSelfResolveSuppression {
+    /// Marks `asset_id` as having just been resolved by Foundation's own code.
+    fn note_self_resolve(&mut self, asset_id: AssetId<ScenePatch>) {
+        let suppressed_until = Instant::now() + self.suppression_window;
+        self.suppressed_until.insert(asset_id, suppressed_until);
+    }
+
+    /// Returns `true` when a `Modified` event for `asset_id` falls inside the
+    /// self-resolve suppression window and should be ignored.
+    fn is_self_inflicted(&self, asset_id: AssetId<ScenePatch>) -> bool {
+        self.suppressed_until
+            .get(&asset_id)
+            .is_some_and(|suppressed_until| Instant::now() < *suppressed_until)
     }
 }
 
@@ -242,6 +298,17 @@ fn apply_pending_bsn_instances(world: &mut World) {
                     return FoundationBsnResolveStatus::Ready;
                 }
 
+                // Caching the resolved form below mutates the asset via
+                // `Assets::get_mut`, which fires its own `AssetEvent::Modified`
+                // indistinguishable from a genuine on-disk edit. Note the self
+                // resolve before touching the asset so the suppression window
+                // is active by the time that event reaches
+                // `replace_reloaded_bsn_instances`.
+                if let Some(mut suppression) =
+                    world.get_resource_mut::<FoundationBsnSelfResolveSuppression>()
+                {
+                    suppression.note_self_resolve(scene_patch_id);
+                }
                 let scene = scene_patches
                     .get_mut(scene_patch_id)
                     .and_then(|mut scene_patch| scene_patch.scene.take());
@@ -322,14 +389,31 @@ fn replace_reloaded_bsn_instances(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     mut scene_events: MessageReader<AssetEvent<ScenePatch>>,
+    self_resolve_suppression: Option<Res<FoundationBsnSelfResolveSuppression>>,
     scene_instances: Query<(Entity, &FoundationBsnInstance, Option<&ChildOf>)>,
 ) {
+    // Only a genuine on-disk edit to an already-loaded asset should trigger
+    // despawn-and-replace. `LoadedWithDependencies` fires on every normal
+    // first-time load completion, not just file edits; `Modified` events that
+    // fall inside `FoundationBsnSelfResolveSuppression`'s grace window are
+    // Foundation's own resolve-caching writes, not a real edit. Reacting to
+    // either would despawn every instance right after it applies and
+    // re-trigger the same cycle forever through the replacement's own fresh
+    // `asset_server.load` call.
     let reloaded_asset_ids = scene_events
         .read()
-        .filter_map(|asset_event| match asset_event {
-            AssetEvent::LoadedWithDependencies { id } => Some(*id),
-            AssetEvent::Modified { id } => Some(*id),
-            _ => None,
+        .filter_map(|asset_event| {
+            let AssetEvent::Modified { id } = asset_event else {
+                return None;
+            };
+            let is_self_inflicted = self_resolve_suppression
+                .as_deref()
+                .is_some_and(|suppression| suppression.is_self_inflicted(*id));
+            if is_self_inflicted {
+                None
+            } else {
+                Some(*id)
+            }
         })
         .collect::<Vec<_>>();
 
@@ -601,8 +685,11 @@ mod tests {
             .id();
         let child_entity = app.world().get::<Children>(root_entity).unwrap()[0];
 
+        // `Modified` is the genuine on-disk-edit signal; nothing in this test
+        // ever resolves the asset itself, so no suppression credit exists and
+        // this event must be treated as a real reload.
         app.world_mut()
-            .write_message(AssetEvent::LoadedWithDependencies { id: scene_asset_id });
+            .write_message(AssetEvent::Modified { id: scene_asset_id });
         app.update();
 
         assert!(app.world().get_entity(root_entity).is_err());
@@ -611,6 +698,171 @@ mod tests {
         let mut instances = app.world_mut().query::<&FoundationBsnInstance>();
         let replacement_count = instances.iter(app.world()).count();
         assert_eq!(replacement_count, 1);
+    }
+
+    #[test]
+    fn initial_load_completion_does_not_replace_the_instance_that_just_loaded() {
+        // `LoadedWithDependencies` fires on every normal first-time load, not
+        // just dev-time file edits. `apply_pending_bsn_instances` already
+        // applies a freshly-loaded scene patch onto the same entity via its
+        // own polling loop, so treating this event as a reload trigger would
+        // despawn every instance immediately after it finishes loading.
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(bevy::asset::AssetPlugin {
+            file_path: ".".to_string(),
+            ..default()
+        });
+        app.init_asset::<ScenePatch>();
+        app.add_message::<AssetEvent<ScenePatch>>();
+        app.add_systems(Update, replace_reloaded_bsn_instances);
+
+        let scene_handle = app
+            .world_mut()
+            .resource_mut::<Assets<ScenePatch>>()
+            .add(ScenePatch {
+                scene: None,
+                dependencies: Vec::new(),
+                resolved: None,
+            });
+        let scene_asset_id = scene_handle.id();
+        let root_entity = app
+            .world_mut()
+            .spawn((FoundationBsnInstance {
+                asset_path: "scenes/reload-test.bsn".to_string(),
+                scene_owner: None,
+                parent: None,
+                scene_handle,
+            },))
+            .id();
+
+        app.world_mut()
+            .write_message(AssetEvent::LoadedWithDependencies { id: scene_asset_id });
+        app.update();
+
+        assert!(
+            app.world().get_entity(root_entity).is_ok(),
+            "the instance that just finished its own initial load should not be despawned"
+        );
+        let mut instances = app.world_mut().query::<&FoundationBsnInstance>();
+        assert_eq!(instances.iter(app.world()).count(), 1);
+    }
+
+    #[test]
+    fn resolving_an_instance_does_not_trigger_its_own_despawn_and_replace() {
+        // End-to-end regression test for the livelock this suppression fixes:
+        // `apply_pending_bsn_instances` caches the resolved scene form back
+        // onto the `ScenePatch` asset via `Assets::get_mut`, which fires a
+        // real `AssetEvent::Modified` through Bevy's actual asset change
+        // detection. Without suppression, `replace_reloaded_bsn_instances`
+        // would despawn and respawn this same instance forever, since
+        // resolving the replacement retriggers the identical self-inflicted
+        // event on the next frame.
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(bevy::asset::AssetPlugin {
+            file_path: ".".to_string(),
+            ..default()
+        });
+        app.init_asset::<ScenePatch>();
+        app.init_resource::<FoundationBsnSelfResolveSuppression>();
+        app.add_systems(
+            Update,
+            (apply_pending_bsn_instances, replace_reloaded_bsn_instances).chain(),
+        );
+
+        let scene_patch = {
+            let asset_server = app.world().resource::<AssetServer>();
+            ScenePatch::load(asset_server, bevy::scene::bsn! { HardenedRootMarker })
+        };
+        let scene_handle = app
+            .world_mut()
+            .resource_mut::<Assets<ScenePatch>>()
+            .add(scene_patch);
+        let root_entity = app
+            .world_mut()
+            .spawn((
+                FoundationBsnInstance {
+                    asset_path: "scenes/hardened.bsn".to_string(),
+                    scene_owner: None,
+                    parent: None,
+                    scene_handle,
+                },
+                FoundationBsnApplyPending,
+            ))
+            .id();
+
+        // Run several frames so every self-inflicted `Modified` event has a
+        // chance to reach `replace_reloaded_bsn_instances`.
+        for _ in 0..5 {
+            app.update();
+        }
+
+        assert!(
+            app.world().get_entity(root_entity).is_ok(),
+            "an instance resolving itself must not trigger its own despawn-and-replace"
+        );
+        assert!(app.world().get::<HardenedRootMarker>(root_entity).is_some());
+        let mut instances = app.world_mut().query::<&FoundationBsnInstance>();
+        assert_eq!(
+            instances.iter(app.world()).count(),
+            1,
+            "no replacement instance should have been spawned"
+        );
+    }
+
+    #[test]
+    fn a_modified_event_after_the_suppression_window_is_treated_as_a_genuine_reload() {
+        // Proves the suppression window actually expires: a `Modified` event
+        // arriving well after Foundation's own resolve must still be treated
+        // as a real edit, or hot reload would never work again for an asset
+        // that was ever resolved.
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(bevy::asset::AssetPlugin {
+            file_path: ".".to_string(),
+            ..default()
+        });
+        app.init_asset::<ScenePatch>();
+        app.insert_resource(FoundationBsnSelfResolveSuppression {
+            suppressed_until: HashMap::new(),
+            suppression_window: Duration::from_millis(5),
+        });
+        app.add_systems(Update, replace_reloaded_bsn_instances);
+
+        let scene_handle = app
+            .world_mut()
+            .resource_mut::<Assets<ScenePatch>>()
+            .add(ScenePatch {
+                scene: None,
+                dependencies: Vec::new(),
+                resolved: None,
+            });
+        let scene_asset_id = scene_handle.id();
+        let root_entity = app
+            .world_mut()
+            .spawn((FoundationBsnInstance {
+                asset_path: "scenes/reload-test.bsn".to_string(),
+                scene_owner: None,
+                parent: None,
+                scene_handle,
+            },))
+            .id();
+
+        app.world_mut()
+            .resource_mut::<FoundationBsnSelfResolveSuppression>()
+            .note_self_resolve(scene_asset_id);
+        // Let the short suppression window used in this test fully expire.
+        std::thread::sleep(Duration::from_millis(20));
+
+        app.world_mut()
+            .write_message(AssetEvent::Modified { id: scene_asset_id });
+        app.update();
+
+        assert!(
+            app.world().get_entity(root_entity).is_err(),
+            "a Modified event after the suppression window expires must still trigger a real reload"
+        );
     }
 
     #[test]
