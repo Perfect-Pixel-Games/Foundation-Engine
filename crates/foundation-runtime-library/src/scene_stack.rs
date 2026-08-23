@@ -23,6 +23,7 @@ impl Plugin for FoundationSceneStackPlugin {
             .add_message::<SceneUnfocused>()
             .add_message::<SceneLoadRequested>()
             .register_type::<SceneOwner>()
+            .register_type::<SceneContentLoading>()
             // Visibility sync and cleanup run after command processing so both
             // observe the freshly recomputed stack flags and removed scene IDs.
             .add_systems(
@@ -415,6 +416,19 @@ pub struct SceneOwner {
     pub scene_id: SceneId,
 }
 
+/// Marks an entity whose content is not fully ready to display yet.
+///
+/// Attach this to a [`SceneOwner`]-tagged entity — the scene root or any
+/// descendant — while its authored content is still loading or applying.
+/// [`FoundationSceneStackPlugin`]'s visibility sync keeps every entity owned
+/// by that scene hidden until no entity it owns still carries this marker,
+/// even if the scene stack already marked the scene itself visible. Remove
+/// the marker once the entity's content is final, whether it loaded
+/// successfully or failed, so a broken load can never hide a scene forever.
+#[derive(Clone, Copy, Debug, Default, Component, Reflect)]
+#[reflect(Component, Default)]
+pub struct SceneContentLoading;
+
 /// Convenience methods for queuing scene commands through Bevy [`Commands`].
 pub trait SceneCommandsExt {
     /// Queues a command to open a scene with default options.
@@ -632,7 +646,13 @@ fn sync_scene_entity_visibility(
     stack: Res<SceneStack>,
     mut owned_visibilities: Query<(&SceneOwner, Option<&ChildOf>, &mut Visibility)>,
     owners: Query<&SceneOwner>,
+    loading_owners: Query<&SceneOwner, With<SceneContentLoading>>,
 ) {
+    // A scene stays hidden while any entity it owns is still loading,
+    // regardless of stack presentation, so content never renders mid-build.
+    let loading_scene_ids: std::collections::HashSet<SceneId> =
+        loading_owners.iter().map(|owner| owner.scene_id).collect();
+
     for (scene_owner, parent_link, mut visibility) in &mut owned_visibilities {
         // Drive only scene-root entities; owned children follow through Bevy's
         // visibility inheritance, which keeps authored child visibility intact.
@@ -643,7 +663,8 @@ fn sync_scene_entity_visibility(
             continue;
         }
 
-        let scene_visibility = if stack.is_visible(scene_owner.scene_id) {
+        let scene_is_ready = !loading_scene_ids.contains(&scene_owner.scene_id);
+        let scene_visibility = if stack.is_visible(scene_owner.scene_id) && scene_is_ready {
             Visibility::Inherited
         } else {
             Visibility::Hidden
@@ -1002,6 +1023,119 @@ mod tests {
             app.world().get::<Visibility>(owned_entity),
             Some(&Visibility::Inherited),
             "entities should become visible again once uncovered"
+        );
+    }
+
+    #[test]
+    fn loading_scene_entities_stay_hidden_even_when_stack_visible() {
+        let mut app = test_app();
+        app.world_mut()
+            .write_message(SceneCommand::open(SceneSource::runtime("gameplay")));
+        app.update();
+
+        let loading_entity = app
+            .world_mut()
+            .spawn((
+                SceneOwner {
+                    scene_id: SceneId(1),
+                },
+                SceneContentLoading,
+                Visibility::default(),
+            ))
+            .id();
+        app.update();
+
+        assert_eq!(
+            app.world().get::<Visibility>(loading_entity),
+            Some(&Visibility::Hidden),
+            "a scene-owned entity still loading must stay hidden even though the stack marks the scene visible"
+        );
+    }
+
+    #[test]
+    fn scene_becomes_visible_once_loading_marker_clears() {
+        let mut app = test_app();
+        app.world_mut()
+            .write_message(SceneCommand::open(SceneSource::runtime("gameplay")));
+        app.update();
+
+        let loading_entity = app
+            .world_mut()
+            .spawn((
+                SceneOwner {
+                    scene_id: SceneId(1),
+                },
+                SceneContentLoading,
+                Visibility::default(),
+            ))
+            .id();
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(loading_entity),
+            Some(&Visibility::Hidden)
+        );
+
+        app.world_mut()
+            .entity_mut(loading_entity)
+            .remove::<SceneContentLoading>();
+        app.update();
+
+        assert_eq!(
+            app.world().get::<Visibility>(loading_entity),
+            Some(&Visibility::Inherited),
+            "the scene should reveal once nothing it owns is still loading"
+        );
+    }
+
+    #[test]
+    fn loading_marker_on_child_entity_keeps_whole_scene_hidden() {
+        let mut app = test_app();
+        app.world_mut()
+            .write_message(SceneCommand::open(SceneSource::runtime("gameplay")));
+        app.update();
+
+        let scene_owner = SceneOwner {
+            scene_id: SceneId(1),
+        };
+        let root_entity = app
+            .world_mut()
+            .spawn((scene_owner, Visibility::default()))
+            .id();
+        app.world_mut()
+            .spawn((scene_owner, SceneContentLoading, ChildOf(root_entity)));
+        app.update();
+
+        assert_eq!(
+            app.world().get::<Visibility>(root_entity),
+            Some(&Visibility::Hidden),
+            "a loading descendant anywhere in the owned subtree must hide the whole scene root"
+        );
+    }
+
+    #[test]
+    fn covered_ready_scene_stays_hidden_from_presentation_not_readiness() {
+        let mut app = test_app();
+        app.world_mut()
+            .write_message(SceneCommand::open(SceneSource::runtime("gameplay")));
+        app.update();
+
+        let ready_entity = app
+            .world_mut()
+            .spawn((
+                SceneOwner {
+                    scene_id: SceneId(1),
+                },
+                Visibility::default(),
+            ))
+            .id();
+        app.world_mut()
+            .write_message(SceneCommand::open(SceneSource::runtime("main-menu")));
+        app.update();
+
+        assert_eq!(
+            app.world().get::<Visibility>(ready_entity),
+            Some(&Visibility::Hidden),
+            "a ready scene covered by another scene must still be hidden by presentation"
         );
     }
 

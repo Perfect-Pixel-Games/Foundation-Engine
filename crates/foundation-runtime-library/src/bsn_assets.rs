@@ -20,7 +20,7 @@ use std::{
 
 use crate::{
     dynamic_bsn::DynamicBsnLoader,
-    scene_stack::{SceneLoadRequested, SceneOwner, SceneSource},
+    scene_stack::{SceneContentLoading, SceneLoadRequested, SceneOwner, SceneSource},
 };
 
 /// Installs temporary `.bsn` asset loading and hot-reload replacement support.
@@ -45,6 +45,7 @@ impl Plugin for FoundationBsnAssetPlugin {
                 (
                     spawn_requested_bsn_scenes,
                     apply_pending_bsn_instances,
+                    reveal_ready_standalone_bsn_instances,
                     propagate_loaded_bsn_scene_owners,
                     replace_reloaded_bsn_instances,
                 )
@@ -261,10 +262,17 @@ fn spawn_bsn_instance_with_asset_server(
             scene_handle,
         },
         FoundationBsnApplyPending,
+        // Stay hidden until the scene patch applies so authored content never
+        // renders partially-built or on default/unstyled components.
+        Visibility::Hidden,
     ));
 
     if let Some(scene_owner) = scene_owner {
         scene_entity.insert(scene_owner);
+        // Scene-stack visibility sync keeps every entity this scene owns
+        // hidden until this marker is removed below, even once the scene
+        // itself is marked visible in the stack.
+        scene_entity.insert(SceneContentLoading);
     }
 
     if let Some(parent_entity) = parent {
@@ -363,6 +371,7 @@ fn apply_pending_bsn_instances(world: &mut World) {
             Ok(()) => {
                 if let Ok(mut instance_entity_mut) = world.get_entity_mut(instance_entity) {
                     instance_entity_mut.remove::<FoundationBsnApplyPending>();
+                    instance_entity_mut.remove::<SceneContentLoading>();
                 }
             }
             Err(apply_error) => {
@@ -376,9 +385,36 @@ fn apply_pending_bsn_instances(world: &mut World) {
     }
 }
 
+/// Makes a standalone (non-scene-owned) BSN instance visible once it's applied.
+///
+/// Scene-owned instances are revealed by [`crate::scene_stack`]'s visibility
+/// sync, which also accounts for scene-stack presentation (covering/focus) in
+/// addition to content readiness. A standalone instance has no scene stack
+/// entry to drive that sync, so it must reveal itself directly once ready.
+#[allow(clippy::type_complexity)]
+fn reveal_ready_standalone_bsn_instances(
+    mut standalone_instances: Query<
+        &mut Visibility,
+        (
+            With<FoundationBsnInstance>,
+            Without<FoundationBsnApplyPending>,
+            Without<SceneOwner>,
+        ),
+    >,
+) {
+    for mut visibility in &mut standalone_instances {
+        if *visibility != Visibility::Inherited {
+            *visibility = Visibility::Inherited;
+        }
+    }
+}
+
 fn mark_bsn_instance_failed(world: &mut World, instance_entity: Entity, failure_reason: String) {
     if let Ok(mut instance_entity_mut) = world.get_entity_mut(instance_entity) {
         instance_entity_mut.remove::<FoundationBsnApplyPending>();
+        // A failed load is still a settled outcome: reveal the scene instead
+        // of hiding it forever because content was broken.
+        instance_entity_mut.remove::<SceneContentLoading>();
         instance_entity_mut.insert(FoundationBsnApplyFailed {
             reason: failure_reason,
         });
@@ -444,7 +480,15 @@ fn replace_reloaded_bsn_instances(
     }
 }
 
-fn propagate_loaded_bsn_scene_owners(
+/// Recursively propagates each tracked BSN instance's [`SceneOwner`] onto its
+/// authored descendants once scene content has been applied.
+///
+/// Game code that starts its own nested asset loads under a scene-owned
+/// subtree (for example a reusable widget system) should order its
+/// "start loading" system after this one, so newly-discovered nested loads
+/// are correctly attributed to the owning scene before the scene stack's
+/// visibility sync runs. See [`crate::scene_stack::SceneContentLoading`].
+pub fn propagate_loaded_bsn_scene_owners(
     mut commands: Commands,
     scene_instances: Query<(Entity, &FoundationBsnInstance)>,
     children: Query<&Children>,
@@ -509,7 +553,7 @@ mod tests {
     use super::*;
     use bevy::scene::{ResolveContext, ResolveSceneError, ResolvedScene, Scene, SceneDependencies};
 
-    use crate::scene_stack::SceneId;
+    use crate::scene_stack::{SceneCommand, SceneId};
 
     #[derive(Clone, Debug, Default, Component)]
     struct HardenedRootMarker;
@@ -529,6 +573,152 @@ mod tests {
         }
 
         fn register_dependencies(&self, _dependencies: &mut SceneDependencies) {}
+    }
+
+    #[test]
+    fn standalone_bsn_instance_becomes_visible_once_applied() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(bevy::asset::AssetPlugin {
+            file_path: ".".to_string(),
+            ..default()
+        });
+        app.init_asset::<ScenePatch>();
+        app.add_systems(
+            Update,
+            (
+                apply_pending_bsn_instances,
+                reveal_ready_standalone_bsn_instances,
+            )
+                .chain(),
+        );
+
+        let asset_server = app.world().resource::<AssetServer>().clone();
+        let world = app.world_mut();
+        let mut commands = world.commands();
+        let root_entity = spawn_bsn_instance_with_asset_server(
+            &mut commands,
+            &asset_server,
+            "scenes/standalone.bsn".to_string(),
+            None,
+            None,
+        );
+        world.flush();
+
+        assert_eq!(
+            app.world().get::<Visibility>(root_entity),
+            Some(&Visibility::Hidden),
+            "a freshly spawned instance must start hidden so it never renders partially built"
+        );
+
+        // No real asset ever loads in this test, so the instance never
+        // resolves/applies; assert it stays hidden the whole time.
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(root_entity),
+            Some(&Visibility::Hidden)
+        );
+    }
+
+    #[test]
+    fn scene_owned_bsn_root_reveals_only_once_stack_visible_and_content_applied() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(bevy::asset::AssetPlugin {
+            file_path: ".".to_string(),
+            ..default()
+        });
+        app.add_plugins(crate::scene_stack::FoundationSceneStackPlugin);
+        app.init_asset::<ScenePatch>();
+        app.add_systems(Update, apply_pending_bsn_instances);
+
+        let scene_patch = {
+            let asset_server = app.world().resource::<AssetServer>();
+            ScenePatch::load(asset_server, bevy::scene::bsn! { HardenedRootMarker })
+        };
+        let scene_handle = app
+            .world_mut()
+            .resource_mut::<Assets<ScenePatch>>()
+            .add(scene_patch);
+        let scene_owner = SceneOwner {
+            scene_id: SceneId(1),
+        };
+        let root_entity = app
+            .world_mut()
+            .spawn((
+                FoundationBsnInstance {
+                    asset_path: "scenes/hardened.bsn".to_string(),
+                    scene_owner: Some(scene_owner),
+                    parent: None,
+                    scene_handle,
+                },
+                FoundationBsnApplyPending,
+                SceneContentLoading,
+                Visibility::Hidden,
+                scene_owner,
+            ))
+            .id();
+        // A stack entry with a matching id and no covering scenes above it.
+        app.world_mut()
+            .write_message(SceneCommand::open(SceneSource::runtime("gameplay")));
+
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(root_entity),
+            Some(&Visibility::Inherited),
+            "the root should reveal once content applies and the stack marks the scene visible"
+        );
+    }
+
+    #[test]
+    fn failed_bsn_load_reveals_instead_of_hiding_forever() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(bevy::asset::AssetPlugin {
+            file_path: ".".to_string(),
+            ..default()
+        });
+        app.add_plugins(crate::scene_stack::FoundationSceneStackPlugin);
+        app.init_asset::<ScenePatch>();
+        app.add_systems(Update, apply_pending_bsn_instances);
+
+        let scene_handle = app
+            .world_mut()
+            .resource_mut::<Assets<ScenePatch>>()
+            .add(ScenePatch {
+                scene: Some(Box::new(FailingScene)),
+                dependencies: Vec::new(),
+                resolved: None,
+            });
+        let scene_owner = SceneOwner {
+            scene_id: SceneId(1),
+        };
+        let root_entity = app
+            .world_mut()
+            .spawn((
+                FoundationBsnInstance {
+                    asset_path: "scenes/failing.bsn".to_string(),
+                    scene_owner: Some(scene_owner),
+                    parent: None,
+                    scene_handle,
+                },
+                FoundationBsnApplyPending,
+                SceneContentLoading,
+                Visibility::Hidden,
+                scene_owner,
+            ))
+            .id();
+        app.world_mut()
+            .write_message(SceneCommand::open(SceneSource::runtime("gameplay")));
+
+        app.update();
+        app.update();
+
+        assert_eq!(
+            app.world().get::<Visibility>(root_entity),
+            Some(&Visibility::Inherited),
+            "a failed load must still reveal the scene instead of hiding it forever"
+        );
     }
 
     #[test]

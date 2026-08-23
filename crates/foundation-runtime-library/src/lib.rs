@@ -113,8 +113,8 @@ pub struct FoundationActor {
 /// Common imports for games using FoundationRuntimeLibrary.
 pub mod prelude {
     pub use crate::bsn_assets::{
-        FoundationBsnAssetPlugin, FoundationBsnCommandsExt, FoundationBsnInstance,
-        FoundationBsnSceneRegistry,
+        propagate_loaded_bsn_scene_owners, FoundationBsnAssetPlugin, FoundationBsnCommandsExt,
+        FoundationBsnInstance, FoundationBsnSceneRegistry,
     };
     #[cfg(feature = "dev-tools")]
     pub use crate::console::{
@@ -151,9 +151,9 @@ pub mod prelude {
     };
     pub use crate::scene_stack::{
         FoundationSceneStackPlugin, OpenSceneOptions, SceneAdded, SceneCommand, SceneCommandsExt,
-        SceneFocused, SceneId, SceneKey, SceneLoadRequested, SceneOwner, ScenePresentation,
-        SceneRemoved, SceneRuntimeFlags, SceneSource, SceneStack, SceneStackEntry, SceneTarget,
-        SceneUnfocused,
+        SceneContentLoading, SceneFocused, SceneId, SceneKey, SceneLoadRequested, SceneOwner,
+        ScenePresentation, SceneRemoved, SceneRuntimeFlags, SceneSource, SceneStack,
+        SceneStackEntry, SceneTarget, SceneUnfocused,
     };
     pub use crate::splash_screen::{
         FoundationSplashRuntimeSettings, FoundationSplashScreen, FoundationSplashScreenPlugin,
