@@ -6,7 +6,7 @@
 //! stack commands when the sequence completes.
 
 use crate::scene_stack::{
-    OpenSceneOptions, SceneCommand, SceneOwner, ScenePresentation, SceneSource,
+    OpenSceneOptions, SceneCommand, SceneLoadMode, SceneOwner, ScenePresentation, SceneSource,
 };
 use bevy::prelude::*;
 
@@ -115,6 +115,13 @@ pub struct FoundationSplashScreen {
     /// If true and `reset_stack_for_next_scene` is false, close the current
     /// splash scene while opening the next one.
     pub replace_current_scene: bool,
+    /// Load mode used when opening [`next_scene_key`](Self::next_scene_key).
+    ///
+    /// Defaults to `Streaming` (existing behavior). Set to `Blocking` so the
+    /// splash doesn't hand off until the next scene's content — including
+    /// any nested widgets — has actually finished loading, avoiding a
+    /// pop-in on first appearance.
+    pub load_mode: SceneLoadMode,
 }
 
 impl FoundationSplashScreen {
@@ -126,6 +133,7 @@ impl FoundationSplashScreen {
             next_scene_key: String::new(),
             reset_stack_for_next_scene: false,
             replace_current_scene: true,
+            load_mode: SceneLoadMode::default(),
         }
     }
 
@@ -146,11 +154,13 @@ impl FoundationSplashScreen {
             Some(SceneCommand::ClearAndOpen {
                 source: next_scene_source,
                 options: OpenSceneOptions::default()
-                    .with_presentation(ScenePresentation::FULLSCREEN),
+                    .with_presentation(ScenePresentation::FULLSCREEN)
+                    .with_load_mode(self.load_mode),
             })
         } else {
             let mut options = OpenSceneOptions::default()
-                .with_presentation(ScenePresentation::INPUT_BLOCKING_OVERLAY);
+                .with_presentation(ScenePresentation::INPUT_BLOCKING_OVERLAY)
+                .with_load_mode(self.load_mode);
             if self.replace_current_scene {
                 // Replacing the current splash keeps only one transient splash entry alive.
                 options = options.close_current();
@@ -526,6 +536,24 @@ mod tests {
                 source: SceneSource::bsn_scene("main_menu"),
                 options: OpenSceneOptions::default()
                     .with_presentation(ScenePresentation::FULLSCREEN),
+            })
+        );
+    }
+
+    #[test]
+    fn splash_completion_command_carries_the_configured_load_mode() {
+        let mut splash = FoundationSplashScreen::new();
+        splash.next_scene_key = "main_menu".to_string();
+        splash.reset_stack_for_next_scene = true;
+        splash.load_mode = SceneLoadMode::Blocking;
+
+        assert_eq!(
+            splash.completion_command(),
+            Some(SceneCommand::ClearAndOpen {
+                source: SceneSource::bsn_scene("main_menu"),
+                options: OpenSceneOptions::default()
+                    .with_presentation(ScenePresentation::FULLSCREEN)
+                    .with_load_mode(SceneLoadMode::Blocking),
             })
         );
     }
