@@ -300,7 +300,7 @@ impl BsnAst {
                     StructOrStructVariant::StructVariant(
                         enumeration
                             .variant(&symbol.1)
-                            .unwrap()
+                            .ok_or_else(|| DynamicBsnLoaderError::UnknownType(symbol.as_path()))?
                             .as_struct_variant()?,
                     )
                 } else {
@@ -393,7 +393,7 @@ impl BsnAst {
                 } else if let Ok(enumeration) = template_type_info.as_enum() {
                     enumeration
                         .variant(&symbol.1)
-                        .unwrap()
+                        .ok_or_else(|| DynamicBsnLoaderError::UnknownType(symbol.as_path()))?
                         .as_tuple_variant()?
                         .iter()
                         .collect::<Vec<_>>()
@@ -691,7 +691,13 @@ impl BsnAst {
             }
 
             BsnExpr::StringLit(ref string) => {
-                let expected_type_registration = type_registry.get(expected_template_type).unwrap();
+                let expected_type_registration =
+                    type_registry.get(expected_template_type).ok_or_else(|| {
+                        DynamicBsnLoaderError::UnknownType(format!(
+                            "TypeId {:?}",
+                            expected_template_type
+                        ))
+                    })?;
 
                 // TODO: Support `&str`, `Cow<str>`, `Arc<str>`, etc. too?
                 if expected_template_type == TypeId::of::<String>() {
@@ -851,7 +857,10 @@ fn create_reflect_default(
     type_registry: &TypeRegistry,
     expected_template_type: TypeId,
 ) -> Result<Box<dyn Reflect>, DynamicBsnLoaderError> {
-    let expected_type_registration = type_registry.get(expected_template_type).unwrap();
+    let expected_type_registration =
+        type_registry.get(expected_template_type).ok_or_else(|| {
+            DynamicBsnLoaderError::UnknownType(format!("TypeId {:?}", expected_template_type))
+        })?;
     create_reflect_default_from_type_registration(expected_type_registration)
 }
 
@@ -1308,5 +1317,117 @@ impl<'a> StructOrStructVariant<'a> {
                 struct_variant.field(field_name)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Struct-with-fields is authored as `path::to::Enum::Variant { field: value }`; a fresh test
+    // enum with a real struct variant lets each test author a *different*, non-existent variant
+    // name to prove the lookup is guarded, not just coincidentally successful.
+    #[derive(Reflect)]
+    enum TestStructVariantEnum {
+        RealStructVariant { value: i32 },
+    }
+
+    #[derive(Reflect)]
+    enum TestTupleVariantEnum {
+        RealTupleVariant(i32),
+    }
+
+    // Deliberately never registered with any `AppTypeRegistry`, so any lookup by its `TypeId`
+    // must fail the same way an author-facing field type that forgot `app.register_type::<T>()`
+    // would fail.
+    struct UnregisteredFieldType;
+
+    fn app_type_registry_with<T: bevy::reflect::GetTypeRegistration>() -> AppTypeRegistry {
+        let app_type_registry = AppTypeRegistry::default();
+        app_type_registry.write().register::<T>();
+        app_type_registry
+    }
+
+    fn enum_symbol_with_unknown_variant<T: TypePath>(unknown_variant_name: &str) -> BsnSymbol {
+        let enum_type_path_segments: Vec<String> =
+            T::type_path().split("::").map(str::to_string).collect();
+        BsnSymbol(enum_type_path_segments, unknown_variant_name.to_string())
+    }
+
+    fn assert_unknown_type_error<T>(result: Result<T, DynamicBsnLoaderError>, failing_case: &str) {
+        match result {
+            Err(DynamicBsnLoaderError::UnknownType(_)) => {}
+            Err(other_error) => panic!(
+                "{failing_case} must fail with `UnknownType`, not a different error: {other_error}"
+            ),
+            Ok(_) => panic!(
+                "{failing_case} must fail with `UnknownType`, but conversion unexpectedly succeeded"
+            ),
+        }
+    }
+
+    #[test]
+    fn struct_patch_with_an_unknown_enum_variant_name_fails_instead_of_panicking() {
+        let app_type_registry = app_type_registry_with::<TestStructVariantEnum>();
+        let symbol = enum_symbol_with_unknown_variant::<TestStructVariantEnum>("TypoedVariant");
+
+        let mut ast = BsnAst::default();
+        let patch_entity = ast.create_patch(BsnPatch::Struct(BsnStruct(symbol, vec![], false)));
+
+        let result = ast.convert_bsn_patch_to_patch(patch_entity, &app_type_registry);
+
+        assert_unknown_type_error(result, "an unknown struct-variant name");
+    }
+
+    #[test]
+    fn named_tuple_patch_with_an_unknown_enum_variant_name_fails_instead_of_panicking() {
+        let app_type_registry = app_type_registry_with::<TestTupleVariantEnum>();
+        let symbol = enum_symbol_with_unknown_variant::<TestTupleVariantEnum>("TypoedVariant");
+
+        let mut ast = BsnAst::default();
+        let patch_entity =
+            ast.create_patch(BsnPatch::NamedTuple(BsnNamedTuple(symbol, vec![], false)));
+
+        let result = ast.convert_bsn_patch_to_patch(patch_entity, &app_type_registry);
+
+        assert_unknown_type_error(result, "an unknown tuple-variant name");
+    }
+
+    #[test]
+    fn string_literal_targeting_an_unregistered_field_type_fails_instead_of_panicking() {
+        let app_type_registry = AppTypeRegistry::default();
+
+        let mut ast = BsnAst::default();
+        let expr_entity = ast.create_expr(BsnExpr::StringLit("hello".to_string()));
+
+        let result = ast.convert_bsn_expr_to_reflect(
+            expr_entity,
+            &app_type_registry,
+            TypeId::of::<UnregisteredFieldType>(),
+        );
+
+        assert_unknown_type_error(
+            result,
+            "a string literal targeting an unregistered field type",
+        );
+    }
+
+    #[test]
+    fn float_literal_targeting_an_unregistered_field_type_fails_instead_of_panicking() {
+        let app_type_registry = AppTypeRegistry::default();
+
+        let mut ast = BsnAst::default();
+        let expr_entity = ast.create_expr(BsnExpr::FloatLit(1.0));
+
+        let result = ast.convert_bsn_expr_to_reflect(
+            expr_entity,
+            &app_type_registry,
+            TypeId::of::<UnregisteredFieldType>(),
+        );
+
+        assert_unknown_type_error(
+            result,
+            "a float literal targeting an unregistered field type",
+        );
     }
 }
