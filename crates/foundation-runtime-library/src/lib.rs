@@ -113,8 +113,8 @@ pub struct FoundationActor {
 /// Common imports for games using FoundationRuntimeLibrary.
 pub mod prelude {
     pub use crate::bsn_assets::{
-        propagate_loaded_bsn_scene_owners, FoundationBsnAssetPlugin, FoundationBsnCommandsExt,
-        FoundationBsnInstance, FoundationBsnSceneRegistry,
+        apply_pending_bsn_instances, propagate_loaded_bsn_scene_owners, FoundationBsnAssetPlugin,
+        FoundationBsnCommandsExt, FoundationBsnInstance, FoundationBsnSceneRegistry,
     };
     #[cfg(feature = "dev-tools")]
     pub use crate::console::{

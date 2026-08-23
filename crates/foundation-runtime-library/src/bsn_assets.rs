@@ -349,7 +349,15 @@ fn spawn_bsn_instance_with_asset_server(
     scene_entity.id()
 }
 
-fn apply_pending_bsn_instances(world: &mut World) {
+/// Applies loaded `ScenePatch` content onto tracked BSN root/prefab entities.
+///
+/// Game code that reassigns fonts, styling, or other post-processing on
+/// newly-authored components (for example via `Added<TextFont>`) should
+/// order that system `.after(apply_pending_bsn_instances)`, so it sees
+/// corrected values on the same frame text/nodes are created — otherwise
+/// that content can render for one full frame with its unauthored default
+/// styling before the correction system next runs.
+pub fn apply_pending_bsn_instances(world: &mut World) {
     let pending_instances = {
         let mut pending_query = world
             .query_filtered::<(Entity, &FoundationBsnInstance), With<FoundationBsnApplyPending>>();
