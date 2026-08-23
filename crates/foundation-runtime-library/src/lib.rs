@@ -151,8 +151,8 @@ pub mod prelude {
     };
     pub use crate::scene_stack::{
         FoundationSceneStackPlugin, OpenSceneOptions, SceneAdded, SceneCommand, SceneCommandsExt,
-        SceneContentLoading, SceneFocused, SceneId, SceneKey, SceneLoadRequested, SceneOwner,
-        ScenePresentation, SceneRemoved, SceneRuntimeFlags, SceneSource, SceneStack,
+        SceneContentLoading, SceneFocused, SceneId, SceneKey, SceneLoadMode, SceneLoadRequested,
+        SceneOwner, ScenePresentation, SceneRemoved, SceneRuntimeFlags, SceneSource, SceneStack,
         SceneStackEntry, SceneTarget, SceneUnfocused,
     };
     pub use crate::splash_screen::{
