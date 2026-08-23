@@ -6,7 +6,7 @@
 //! scene source instead of being converted into a separate Foundation-specific
 //! scene format.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
 
@@ -19,6 +19,7 @@ impl Plugin for FoundationSceneStackPlugin {
         // The stack resource owns scene lifecycle; messages are the public mutation API.
         app.init_resource::<SceneStack>()
             .init_resource::<PendingSceneTransitions>()
+            .init_resource::<ScenePreloadRegistry>()
             .add_message::<SceneCommand>()
             .add_message::<SceneAdded>()
             .add_message::<SceneRemoved>()
@@ -77,7 +78,7 @@ impl From<String> for SceneKey {
 ///
 /// BSN scene keys are first-class sources so FoundationRuntimeLibrary can cooperate
 /// with code-authored BSN scenes without defining a second scene-stack API.
-#[derive(Clone, Debug, PartialEq, Eq, Reflect)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq, Reflect)]
 pub enum SceneSource {
     /// A Bevy BSN scene key resolved by the active game catalog.
     BsnScene { key: String },
@@ -433,6 +434,89 @@ pub struct SceneLoadRequested {
     pub scene_id: SceneId,
     /// Source that describes what content should be loaded or assembled.
     pub source: SceneSource,
+}
+
+/// How a declared [`ScenePreloadTarget`] participates in the owning scene's readiness.
+///
+/// Both modes currently warm the target's underlying asset identically. Only
+/// `Background` is wired end-to-end for now — see `ScenePreloadTarget`'s docs
+/// for why `Blocking` is a reserved, not-yet-gating variant.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Reflect)]
+pub enum ScenePreloadMode {
+    /// Start loading in the background; never gates anything.
+    #[default]
+    Background,
+    /// Reserved for a future readiness integration: intended to require this
+    /// target's asset to finish loading before the owning scene's own
+    /// `SceneLoadMode::Blocking` transition activates. Not yet wired into
+    /// `advance_pending_scene_transitions` — seeing this mode registered
+    /// today has the same effect as `Background`. Left as a distinct,
+    /// forward-declared variant instead of a two-state enum so the public
+    /// API doesn't need to break once a concrete use case justifies wiring
+    /// the actual gate; games should not rely on it blocking anything yet.
+    Blocking,
+}
+
+/// A scene source another scene wants preloaded, and how it should participate.
+#[derive(Clone, Debug, PartialEq, Eq, Reflect)]
+pub struct ScenePreloadTarget {
+    /// Scene source to start loading.
+    pub source: SceneSource,
+    /// How this target participates in the owning scene's readiness.
+    pub mode: ScenePreloadMode,
+}
+
+impl ScenePreloadTarget {
+    /// Creates a background preload target (never gates anything).
+    pub fn background(source: impl Into<SceneSource>) -> Self {
+        Self {
+            source: source.into(),
+            mode: ScenePreloadMode::Background,
+        }
+    }
+
+    /// Creates a preload target marked `Blocking` (see [`ScenePreloadMode::Blocking`]).
+    pub fn blocking(source: impl Into<SceneSource>) -> Self {
+        Self {
+            source: source.into(),
+            mode: ScenePreloadMode::Blocking,
+        }
+    }
+}
+
+/// Registers scene sources that should start loading when another scene becomes active.
+///
+/// Registering a preload target only warms its underlying asset — it does
+/// not spawn scene content or interact with the scene stack in any way. A
+/// later `SceneCommand::Open` for the same source still constructs its own
+/// fresh entity tree as normal; preloading only removes asset I/O/parse
+/// latency from that later transition, not the BSN apply cost itself. There
+/// is no automatic refill after a preloaded target is actually opened —
+/// deliberately simple by design; see `docs/plans/async-scene-loading/plan.md`
+/// for why.
+#[derive(Debug, Default, Resource)]
+pub struct ScenePreloadRegistry {
+    preload_targets_by_source: HashMap<SceneSource, Vec<ScenePreloadTarget>>,
+}
+
+impl ScenePreloadRegistry {
+    /// Registers preload targets that should start loading when `owner` becomes active.
+    pub fn register_preloads(
+        &mut self,
+        owner: impl Into<SceneSource>,
+        targets: impl IntoIterator<Item = ScenePreloadTarget>,
+    ) {
+        self.preload_targets_by_source
+            .insert(owner.into(), targets.into_iter().collect());
+    }
+
+    /// Returns the registered preload targets for `owner`.
+    pub fn preload_targets(&self, owner: &SceneSource) -> &[ScenePreloadTarget] {
+        self.preload_targets_by_source
+            .get(owner)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
 }
 
 /// Tags entities that are owned by a scene stack entry.
@@ -930,6 +1014,37 @@ mod tests {
                 key: SceneKey::new("pause_menu")
             }
         );
+    }
+
+    #[test]
+    fn preload_target_constructors_set_the_expected_mode() {
+        let background_target = ScenePreloadTarget::background(SceneSource::bsn_scene("a"));
+        assert_eq!(background_target.mode, ScenePreloadMode::Background);
+
+        let blocking_target = ScenePreloadTarget::blocking(SceneSource::bsn_scene("b"));
+        assert_eq!(blocking_target.mode, ScenePreloadMode::Blocking);
+    }
+
+    #[test]
+    fn preload_registry_returns_registered_targets_for_the_owner() {
+        let mut registry = ScenePreloadRegistry::default();
+        let gameplay_source = SceneSource::runtime("gameplay_level");
+        registry.register_preloads(
+            gameplay_source.clone(),
+            [ScenePreloadTarget::background(SceneSource::runtime(
+                "pause_menu",
+            ))],
+        );
+
+        assert_eq!(
+            registry.preload_targets(&gameplay_source),
+            &[ScenePreloadTarget::background(SceneSource::runtime(
+                "pause_menu"
+            ))]
+        );
+        assert!(registry
+            .preload_targets(&SceneSource::runtime("unregistered"))
+            .is_empty());
     }
 
     #[test]

@@ -20,7 +20,10 @@ use std::{
 
 use crate::{
     dynamic_bsn::DynamicBsnLoader,
-    scene_stack::{SceneContentLoading, SceneLoadRequested, SceneOwner, SceneSource},
+    scene_stack::{
+        SceneAdded, SceneContentLoading, SceneFocused, SceneLoadRequested, SceneOwner,
+        ScenePreloadRegistry, SceneSource, SceneStack,
+    },
 };
 
 /// Installs temporary `.bsn` asset loading and hot-reload replacement support.
@@ -39,11 +42,17 @@ impl Plugin for FoundationBsnAssetPlugin {
         app.init_asset_loader::<DynamicBsnLoader>()
             .init_resource::<FoundationBsnSceneRegistry>()
             .init_resource::<FoundationBsnSelfResolveSuppression>()
+            .init_resource::<ScenePreloadHandles>()
             .register_type::<FoundationBsnInstance>()
             .add_systems(
                 Update,
                 (
                     spawn_requested_bsn_scenes,
+                    // Guarded so `FoundationBsnAssetPlugin` still works when
+                    // added on its own, without `FoundationSceneStackPlugin`
+                    // (a supported, tested standalone-BSN-loading path).
+                    warm_registered_scene_preloads
+                        .run_if(resource_exists::<crate::scene_stack::ScenePreloadRegistry>),
                     apply_pending_bsn_instances,
                     reveal_ready_standalone_bsn_instances,
                     propagate_loaded_bsn_scene_owners,
@@ -223,6 +232,64 @@ fn spawn_requested_bsn_scenes(
             Some(scene_owner),
             None,
         );
+    }
+}
+
+/// Tracks BSN scene assets Foundation has started warming via a
+/// [`ScenePreloadRegistry`] declaration.
+///
+/// Holding the loaded [`Handle<ScenePatch>`] here keeps the asset alive for
+/// the rest of the session — otherwise Bevy would free it as soon as every
+/// other strong handle drops, undoing the warm-up. Also prevents re-issuing
+/// a redundant `AssetServer::load` every time the owning scene refocuses.
+#[derive(Debug, Default, Resource)]
+struct ScenePreloadHandles {
+    handles_by_source: HashMap<SceneSource, Handle<ScenePatch>>,
+}
+
+/// Starts loading each registered preload target's `.bsn` asset when its
+/// owning scene is added to or refocused on the stack.
+///
+/// This only warms the asset — it does not spawn scene content. See
+/// [`ScenePreloadRegistry`]'s docs for why.
+fn warm_registered_scene_preloads(
+    asset_server: Res<AssetServer>,
+    registry: Res<FoundationBsnSceneRegistry>,
+    preload_registry: Res<ScenePreloadRegistry>,
+    mut preload_handles: ResMut<ScenePreloadHandles>,
+    stack: Res<SceneStack>,
+    mut scene_added: MessageReader<SceneAdded>,
+    mut scene_focused: MessageReader<SceneFocused>,
+) {
+    let mut activated_scene_ids = scene_added
+        .read()
+        .map(|message| message.scene_id)
+        .collect::<Vec<_>>();
+    activated_scene_ids.extend(scene_focused.read().map(|message| message.scene_id));
+
+    for activated_scene_id in activated_scene_ids {
+        let Some(scene_entry) = stack.get(activated_scene_id) else {
+            continue;
+        };
+
+        for preload_target in preload_registry.preload_targets(&scene_entry.source) {
+            let SceneSource::BsnScene { key } = &preload_target.source else {
+                // Runtime sources have no `.bsn` asset to warm.
+                continue;
+            };
+            if preload_handles
+                .handles_by_source
+                .contains_key(&preload_target.source)
+            {
+                continue;
+            }
+
+            let asset_path = registry.resolve_scene_path(key);
+            let scene_handle: Handle<ScenePatch> = asset_server.load(asset_path);
+            preload_handles
+                .handles_by_source
+                .insert(preload_target.source.clone(), scene_handle);
+        }
     }
 }
 
@@ -573,6 +640,58 @@ mod tests {
         }
 
         fn register_dependencies(&self, _dependencies: &mut SceneDependencies) {}
+    }
+
+    #[test]
+    fn opening_the_owning_scene_warms_its_registered_preload_targets() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(bevy::asset::AssetPlugin {
+            file_path: ".".to_string(),
+            ..default()
+        });
+        app.add_plugins(crate::scene_stack::FoundationSceneStackPlugin);
+        app.init_asset::<ScenePatch>();
+        app.init_resource::<ScenePreloadHandles>();
+        app.init_resource::<FoundationBsnSceneRegistry>();
+        app.add_systems(Update, warm_registered_scene_preloads);
+
+        let gameplay_source = SceneSource::runtime("gameplay_level");
+        let pause_menu_target = SceneSource::bsn_scene("last-beacon/pause_menu");
+        app.world_mut()
+            .resource_mut::<crate::scene_stack::ScenePreloadRegistry>()
+            .register_preloads(
+                gameplay_source.clone(),
+                [crate::scene_stack::ScenePreloadTarget::background(
+                    pause_menu_target.clone(),
+                )],
+            );
+
+        app.world_mut()
+            .write_message(SceneCommand::open(gameplay_source));
+        // `FoundationSceneStackPlugin` processes commands in `PostUpdate`, so
+        // the resulting `SceneAdded` message isn't visible to this `Update`
+        // system until the following frame.
+        app.update();
+        app.update();
+
+        let preload_handles = app.world().resource::<ScenePreloadHandles>();
+        assert!(
+            preload_handles
+                .handles_by_source
+                .contains_key(&pause_menu_target),
+            "opening the owning scene should start warming its registered preload target"
+        );
+
+        // Refocusing the same scene must not issue a second, redundant load.
+        app.world_mut()
+            .write_message(SceneCommand::open(SceneSource::runtime("overlay")));
+        app.world_mut().write_message(SceneCommand::CloseCurrent);
+        app.update();
+        app.update();
+
+        let preload_handles = app.world().resource::<ScenePreloadHandles>();
+        assert_eq!(preload_handles.handles_by_source.len(), 1);
     }
 
     #[test]
