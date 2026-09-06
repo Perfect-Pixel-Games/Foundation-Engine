@@ -25,9 +25,12 @@ lalrpop_util::lalrpop_mod!(
 pub mod game_settings;
 pub mod logging;
 pub mod menu;
+#[cfg(feature = "dev-tools")]
+pub mod perf_overlay;
 pub mod scene_stack;
 pub mod splash_screen;
 pub mod startup_scene;
+pub mod ui_theme;
 
 /// Shared baseline plugin for Foundation games.
 ///
@@ -44,13 +47,22 @@ impl Plugin for FoundationPlugin {
             splash_screen::FoundationSplashScreenPlugin,
             menu::FoundationMenuPlugin,
             credits::FoundationCreditsPlugin,
+            ui_theme::FoundationUiThemePlugin,
         ))
         // Keep common settings and actors visible to the editor and reflection tests.
         .register_type::<game_settings::FoundationGameSettings>()
         .register_type::<FoundationSettings>()
         .register_type::<FoundationActor>()
+        .register_type::<ui_theme::FoundationUiTheme>()
+        .register_type::<ui_theme::FoundationUiColorToken>()
+        .register_type::<ui_theme::FoundationUiSpaceToken>()
+        .register_type::<ui_theme::FoundationUiFontSizeToken>()
+        .register_type::<ui_theme::FoundationUiBorderWidthToken>()
+        .register_type::<ui_theme::FoundationUiBorderRadiusToken>()
+        .register_type::<ui_theme::FoundationUiTypographyToken>()
         .init_resource::<game_settings::FoundationGameSettings>()
-        .init_resource::<FoundationSettings>();
+        .init_resource::<FoundationSettings>()
+        .init_resource::<ui_theme::FoundationUiTheme>();
 
         // The temporary BSN asset bridge needs Bevy's asset infrastructure,
         // which is installed by DefaultPlugins or AssetPlugin before Foundation.
@@ -68,7 +80,10 @@ impl FoundationPlugin {
     #[cfg(feature = "dev-tools")]
     fn add_dev_tool_plugins(&self, app: &mut App) {
         // Debug console tooling is intentionally absent from shipping builds.
-        app.add_plugins(console::FoundationConsolePlugin);
+        app.add_plugins((
+            console::FoundationConsolePlugin,
+            perf_overlay::FoundationPerfOverlayPlugin,
+        ));
     }
 
     #[cfg(not(feature = "dev-tools"))]
@@ -149,6 +164,8 @@ pub mod prelude {
         FoundationPauseOpener, FoundationPauseState, FoundationPlaceholderMenu,
         FoundationResumeOnEscape, FoundationSimpleGameplayLevel, FoundationSpin,
     };
+    #[cfg(feature = "dev-tools")]
+    pub use crate::perf_overlay::{FoundationPerfOverlayPlugin, FoundationPerfOverlayState};
     pub use crate::scene_stack::{
         FoundationSceneStackPlugin, OpenSceneOptions, SceneAdded, SceneCommand, SceneCommandsExt,
         SceneContentLoading, SceneFocused, SceneId, SceneKey, SceneLoadMode, SceneLoadRequested,
@@ -164,6 +181,17 @@ pub mod prelude {
     pub use crate::startup_scene::{
         startup_scene_commands_or_default, FoundationStartupSceneOverrideError,
         FOUNDATION_STARTUP_SCENE_ARGUMENT,
+    };
+    pub use crate::ui_theme::{
+        load_ui_theme_from_file, resolve_ui_themed_backgrounds, resolve_ui_themed_border_colors,
+        resolve_ui_themed_border_radius, resolve_ui_themed_border_width, resolve_ui_themed_font_sizes,
+        resolve_ui_themed_gap, resolve_ui_themed_padding, resolve_ui_themed_text,
+        resolve_ui_themed_typography, FoundationUiBorderRadiusToken, FoundationUiBorderWidthToken,
+        FoundationUiColorToken, FoundationUiFontSizeToken, FoundationUiSpaceToken, FoundationUiTheme,
+        FoundationUiThemedBackground, FoundationUiThemedBorderColor, FoundationUiThemedBorderRadius,
+        FoundationUiThemedBorderWidth, FoundationUiThemedFontSize, FoundationUiThemedGap,
+        FoundationUiThemedPadding, FoundationUiThemedText, FoundationUiThemedTypography,
+        FoundationUiThemePlugin, FoundationUiTypographyToken,
     };
     #[cfg(feature = "dev-tools")]
     pub use crate::{console_command, ConsoleCommandInput};
@@ -214,6 +242,42 @@ mod tests {
         assert_reflects_default::<menu::FoundationSimpleGameplayLevel>(&registry);
         assert_reflects_default::<menu::FoundationSpin>(&registry);
         assert_reflects_default::<credits::FoundationCreditsRoll>(&registry);
+        assert_reflects_default::<ui_theme::FoundationUiThemedBackground>(&registry);
+        assert_reflects_default::<ui_theme::FoundationUiThemedBorderColor>(&registry);
+        assert_reflects_default::<ui_theme::FoundationUiThemedText>(&registry);
+        assert_reflects_default::<ui_theme::FoundationUiThemedTypography>(&registry);
+        assert_reflects_default::<ui_theme::FoundationUiThemedFontSize>(&registry);
+        assert_reflects_default::<ui_theme::FoundationUiThemedPadding>(&registry);
+        assert_reflects_default::<ui_theme::FoundationUiThemedGap>(&registry);
+        assert_reflects_default::<ui_theme::FoundationUiThemedBorderWidth>(&registry);
+        assert_reflects_default::<ui_theme::FoundationUiThemedBorderRadius>(&registry);
+    }
+
+    #[test]
+    fn foundation_ui_theme_token_enums_reflect_default() {
+        // Regression test: a BSN-authored field value like
+        // `FoundationUiColorToken::Accent` requires the *field's own type* to
+        // reflect `Default` (BSN builds a default value, then patches it to
+        // the named variant), not just the component that wraps it. Missing
+        // `#[reflect(Default)]` on a token enum fails silently at BSN
+        // scene-load time with `type doesn't implement Default`, not at
+        // compile time -- this test catches that class of mistake for every
+        // future token enum.
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(FoundationPlugin);
+
+        let registry = app
+            .world()
+            .resource::<bevy::ecs::reflect::AppTypeRegistry>()
+            .read();
+
+        assert_reflects_default::<ui_theme::FoundationUiColorToken>(&registry);
+        assert_reflects_default::<ui_theme::FoundationUiSpaceToken>(&registry);
+        assert_reflects_default::<ui_theme::FoundationUiFontSizeToken>(&registry);
+        assert_reflects_default::<ui_theme::FoundationUiBorderWidthToken>(&registry);
+        assert_reflects_default::<ui_theme::FoundationUiBorderRadiusToken>(&registry);
+        assert_reflects_default::<ui_theme::FoundationUiTypographyToken>(&registry);
     }
 
     fn assert_reflects_default<T: 'static>(registry: &bevy::reflect::TypeRegistry) {

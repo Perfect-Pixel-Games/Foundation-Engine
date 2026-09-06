@@ -1430,4 +1430,33 @@ mod tests {
             "a float literal targeting an unregistered field type",
         );
     }
+
+    #[test]
+    fn spawning_text_without_authored_font_or_color_still_yields_them_via_required_components() {
+        // A `.bsn`-authored `Text` node that never mentions `TextFont`/
+        // `TextColor` still ends up with both, via Bevy's required-components
+        // mechanism -- exactly the assumption `divider.bsn` already relies on
+        // today for `BackgroundColor`/`BorderColor`. `insert_reflect` (used by
+        // `DefaultDynamicErasedTemplate::apply` above) inserts through the
+        // same core `World` bundle-insertion path as a typed `spawn`, so a
+        // plain typed spawn here is a faithful proxy for what a `.bsn` file
+        // produces. This matters for the UI theme migration: migrated
+        // widgets delete `TextFont`/`TextColor` literal lines entirely
+        // rather than replacing them with placeholder values, relying on
+        // this required-components fallback until the themed wrapper
+        // components' resolver systems supply the real value.
+        use bevy::prelude::{Text, TextColor, TextFont};
+
+        let mut world = World::new();
+        let entity = world.spawn(Text::new("x")).id();
+
+        assert!(
+            world.get::<TextFont>(entity).is_some(),
+            "Text's required components should insert a default TextFont"
+        );
+        assert!(
+            world.get::<TextColor>(entity).is_some(),
+            "Text's required components should insert a default TextColor"
+        );
+    }
 }
