@@ -96,6 +96,36 @@ The `open` command clears the current scene stack, opens the first scene fresh, 
 | `INPUT_BLOCKING_OVERLAY` | Yes | No | Yes | Options/modal menu |
 | `NON_BLOCKING_OVERLAY` | Yes | Yes | Yes | Debug overlay |
 
+## Readiness Gating (Scene Visibility)
+
+A scene-owned entity can carry `SceneContentLoading` while its authored content is still loading or applying. `sync_scene_entity_visibility` only reveals a scene-owned root once **both** are true:
+
+- the scene stack marks the scene visible (`ScenePresentation`/covering), and
+- no entity that scene owns — the root or any descendant — still carries `SceneContentLoading`.
+
+Foundation's BSN bridge (`bsn_assets.rs`) spawns every scene-owned root `Visibility::Hidden` with `SceneContentLoading` attached, and removes the marker once `ScenePatch::apply` succeeds **or fails** — a broken load must degrade to visible-but-broken content, never hide a scene forever. Games that load their own nested content under a scene root (for example Last Beacon's reusable `.bsn` widgets) should follow the same pattern: attach `SceneContentLoading` to a scene-owned entity while that nested load is pending, and remove it on both success and failure.
+
+There is no generic "readiness token" registration API. A scene's readiness is always just "no `SceneContentLoading` anywhere in its owned subtree" — a plain recursive query, not a separately tracked state machine. Keep it that way; a more general mechanism has been tried before on this project and was the direct cause of a startup livelock (see `docs/plans/async-scene-loading/plan.md`'s Codebase Research section for the full account).
+
+## Scene Load Modes
+
+`OpenSceneOptions::load_mode` (`SceneLoadMode`) controls when a scene open becomes visible:
+
+- **`Streaming`** (default): the scene is pushed onto the stack immediately. Content still obeys the readiness gate above, so it pops in as it loads — this is today's baseline behavior for every existing scene transition unless a call site opts into `Blocking`.
+- **`Blocking`**: the stack mutation itself is held until the target's content is ready. Foundation starts loading the target off-stack (tagged with a reserved `SceneOwner { scene_id }`, but not yet part of `SceneStack::entries`) the moment the command is processed, and `advance_pending_scene_transitions` activates it — pushes the stack entry, assigns focus — only once nothing owned by that `scene_id` still carries `SceneContentLoading`. The currently active stack keeps rendering, updating, and accepting input for the entire wait; only the transition is deferred, never the frame loop. A failed load still activates (a failure clears `SceneContentLoading` too), so a broken `Blocking` target degrades to visible-but-broken content instead of hanging the transition forever.
+
+`clear_stack`/`close_current` on a `Blocking` open are applied at activation time, not when the command is queued — otherwise the current scene would go blank while the replacement is still loading.
+
+`FoundationSplashScreen::load_mode` propagates into the `SceneCommand` a splash screen emits on completion, so a splash driver can request `Blocking` for its next-scene handoff.
+
+## Scene Preload Declarations
+
+`ScenePreloadRegistry::register_preloads(owner, targets)` lets a scene declare other scene sources that should start loading when `owner` is added to the stack or refocused (`ScenePreloadTarget::background(...)` / `::blocking(...)`). Registering a target only warms its underlying `.bsn` asset (`AssetServer::load`, kept alive for the session in `ScenePreloadHandles`) — it does **not** spawn scene content or interact with the scene stack. A later `SceneCommand::Open` for the same source still constructs its own fresh entity tree as normal; preloading only removes asset I/O/parse latency from that later transition, not the `ScenePatch::apply` cost itself.
+
+There is no automatic refill after a preloaded target is actually opened — deliberately simple, by design, to avoid the cache-lifecycle bugs a more elaborate "prepared scene cache" produced on this project previously.
+
+`ScenePreloadMode::Blocking` exists in the type today for a future readiness integration but is **not yet wired to anything** — both modes currently behave identically (asset warming only). Revisit only once a concrete scene genuinely needs to block its own readiness on a dependency's load, not just keep it warm.
+
 ## Current TemplateGame Flow
 
 ```text
@@ -163,6 +193,8 @@ When Bevy reports that a loaded `.bsn` `ScenePatch` changed, Foundation's bridge
 4. Reapply Foundation scene ownership and parent attachment context that belongs to the instance.
 
 Foundation does not attempt in-place diffing or gameplay-state preservation. Entity references into a reloaded prefab or level may become stale after replacement. This is an accepted development-time tradeoff for simple, deterministic hot reload.
+
+Only a genuine on-disk edit to an already-loaded asset triggers this replacement. `AssetEvent::LoadedWithDependencies` never does — it fires on every normal first-time load completion, not just edits, and `apply_pending_bsn_instances` already applies that same load onto the existing entity via its own polling loop. `AssetEvent::Modified` events that fall inside `FoundationBsnSelfResolveSuppression`'s short grace window (500ms) after Foundation's own resolve step are also ignored, since caching the resolved form back onto the asset (`Assets::get_mut`) fires that same event as an unavoidable Bevy side effect, indistinguishable at the event level from a real edit. Without this suppression, every instance would despawn and re-resolve itself shortly after applying, forever.
 
 ## Build Modes Direction
 

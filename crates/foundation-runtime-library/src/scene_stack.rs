@@ -6,6 +6,8 @@
 //! scene source instead of being converted into a separate Foundation-specific
 //! scene format.
 
+use std::collections::{HashMap, HashSet};
+
 use bevy::prelude::*;
 
 /// Installs FoundationRuntimeLibrary scene stack resources and message types.
@@ -16,6 +18,8 @@ impl Plugin for FoundationSceneStackPlugin {
     fn build(&self, app: &mut App) {
         // The stack resource owns scene lifecycle; messages are the public mutation API.
         app.init_resource::<SceneStack>()
+            .init_resource::<PendingSceneTransitions>()
+            .init_resource::<ScenePreloadRegistry>()
             .add_message::<SceneCommand>()
             .add_message::<SceneAdded>()
             .add_message::<SceneRemoved>()
@@ -23,12 +27,15 @@ impl Plugin for FoundationSceneStackPlugin {
             .add_message::<SceneUnfocused>()
             .add_message::<SceneLoadRequested>()
             .register_type::<SceneOwner>()
-            // Visibility sync and cleanup run after command processing so both
-            // observe the freshly recomputed stack flags and removed scene IDs.
+            .register_type::<SceneContentLoading>()
+            // Pending-transition advancement, visibility sync, and cleanup all
+            // run after command processing so each observes the freshly
+            // recomputed stack flags, activated transitions, and removed IDs.
             .add_systems(
                 PostUpdate,
                 (
                     process_scene_commands,
+                    advance_pending_scene_transitions,
                     sync_scene_entity_visibility,
                     cleanup_removed_scene_entities,
                 )
@@ -71,7 +78,7 @@ impl From<String> for SceneKey {
 ///
 /// BSN scene keys are first-class sources so FoundationRuntimeLibrary can cooperate
 /// with code-authored BSN scenes without defining a second scene-stack API.
-#[derive(Clone, Debug, PartialEq, Eq, Reflect)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq, Reflect)]
 pub enum SceneSource {
     /// A Bevy BSN scene key resolved by the active game catalog.
     BsnScene { key: String },
@@ -255,6 +262,23 @@ impl SceneStack {
     }
 }
 
+/// Controls whether opening a scene waits for its content before appearing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Reflect)]
+pub enum SceneLoadMode {
+    /// The scene is pushed onto the stack immediately; its content becomes
+    /// visible as it loads (readiness gating still hides it until then, but
+    /// the stack mutation, focus, and covering take effect right away).
+    #[default]
+    Streaming,
+    /// The stack mutation is held until the scene's content is ready. The
+    /// currently active stack keeps rendering, updating, and accepting
+    /// input for the entire wait — only the transition itself is deferred,
+    /// never the frame loop. A failed load still activates (settled, not
+    /// pending), matching [`SceneContentLoading`]'s existing rule that a
+    /// broken load must never hide content forever.
+    Blocking,
+}
+
 /// Options used when opening a scene.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Reflect)]
 pub struct OpenSceneOptions {
@@ -266,6 +290,8 @@ pub struct OpenSceneOptions {
     pub clear_stack: bool,
     /// Remove the current top scene before opening this scene.
     pub close_current: bool,
+    /// Whether the transition waits for content readiness before appearing.
+    pub load_mode: SceneLoadMode,
 }
 
 impl OpenSceneOptions {
@@ -290,6 +316,12 @@ impl OpenSceneOptions {
     /// Configures the open command to close the current top scene first.
     pub fn close_current(mut self) -> Self {
         self.close_current = true;
+        self
+    }
+
+    /// Sets the scene load mode.
+    pub fn with_load_mode(mut self, load_mode: SceneLoadMode) -> Self {
+        self.load_mode = load_mode;
         self
     }
 }
@@ -404,6 +436,89 @@ pub struct SceneLoadRequested {
     pub source: SceneSource,
 }
 
+/// How a declared [`ScenePreloadTarget`] participates in the owning scene's readiness.
+///
+/// Both modes currently warm the target's underlying asset identically. Only
+/// `Background` is wired end-to-end for now — see `ScenePreloadTarget`'s docs
+/// for why `Blocking` is a reserved, not-yet-gating variant.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Reflect)]
+pub enum ScenePreloadMode {
+    /// Start loading in the background; never gates anything.
+    #[default]
+    Background,
+    /// Reserved for a future readiness integration: intended to require this
+    /// target's asset to finish loading before the owning scene's own
+    /// `SceneLoadMode::Blocking` transition activates. Not yet wired into
+    /// `advance_pending_scene_transitions` — seeing this mode registered
+    /// today has the same effect as `Background`. Left as a distinct,
+    /// forward-declared variant instead of a two-state enum so the public
+    /// API doesn't need to break once a concrete use case justifies wiring
+    /// the actual gate; games should not rely on it blocking anything yet.
+    Blocking,
+}
+
+/// A scene source another scene wants preloaded, and how it should participate.
+#[derive(Clone, Debug, PartialEq, Eq, Reflect)]
+pub struct ScenePreloadTarget {
+    /// Scene source to start loading.
+    pub source: SceneSource,
+    /// How this target participates in the owning scene's readiness.
+    pub mode: ScenePreloadMode,
+}
+
+impl ScenePreloadTarget {
+    /// Creates a background preload target (never gates anything).
+    pub fn background(source: impl Into<SceneSource>) -> Self {
+        Self {
+            source: source.into(),
+            mode: ScenePreloadMode::Background,
+        }
+    }
+
+    /// Creates a preload target marked `Blocking` (see [`ScenePreloadMode::Blocking`]).
+    pub fn blocking(source: impl Into<SceneSource>) -> Self {
+        Self {
+            source: source.into(),
+            mode: ScenePreloadMode::Blocking,
+        }
+    }
+}
+
+/// Registers scene sources that should start loading when another scene becomes active.
+///
+/// Registering a preload target only warms its underlying asset — it does
+/// not spawn scene content or interact with the scene stack in any way. A
+/// later `SceneCommand::Open` for the same source still constructs its own
+/// fresh entity tree as normal; preloading only removes asset I/O/parse
+/// latency from that later transition, not the BSN apply cost itself. There
+/// is no automatic refill after a preloaded target is actually opened —
+/// deliberately simple by design; see `docs/plans/async-scene-loading/plan.md`
+/// for why.
+#[derive(Debug, Default, Resource)]
+pub struct ScenePreloadRegistry {
+    preload_targets_by_source: HashMap<SceneSource, Vec<ScenePreloadTarget>>,
+}
+
+impl ScenePreloadRegistry {
+    /// Registers preload targets that should start loading when `owner` becomes active.
+    pub fn register_preloads(
+        &mut self,
+        owner: impl Into<SceneSource>,
+        targets: impl IntoIterator<Item = ScenePreloadTarget>,
+    ) {
+        self.preload_targets_by_source
+            .insert(owner.into(), targets.into_iter().collect());
+    }
+
+    /// Returns the registered preload targets for `owner`.
+    pub fn preload_targets(&self, owner: &SceneSource) -> &[ScenePreloadTarget] {
+        self.preload_targets_by_source
+            .get(owner)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+}
+
 /// Tags entities that are owned by a scene stack entry.
 ///
 /// Scene-owned entities should remain alive while their owning scene is in the
@@ -414,6 +529,19 @@ pub struct SceneOwner {
     /// Scene that owns this entity.
     pub scene_id: SceneId,
 }
+
+/// Marks an entity whose content is not fully ready to display yet.
+///
+/// Attach this to a [`SceneOwner`]-tagged entity — the scene root or any
+/// descendant — while its authored content is still loading or applying.
+/// [`FoundationSceneStackPlugin`]'s visibility sync keeps every entity owned
+/// by that scene hidden until no entity it owns still carries this marker,
+/// even if the scene stack already marked the scene itself visible. Remove
+/// the marker once the entity's content is final, whether it loaded
+/// successfully or failed, so a broken load can never hide a scene forever.
+#[derive(Clone, Copy, Debug, Default, Component, Reflect)]
+#[reflect(Component, Default)]
+pub struct SceneContentLoading;
 
 /// Convenience methods for queuing scene commands through Bevy [`Commands`].
 pub trait SceneCommandsExt {
@@ -484,9 +612,34 @@ impl<'w, 's> QueueSceneCommand for Commands<'w, 's> {
     }
 }
 
+/// A scene open waiting for [`SceneLoadMode::Blocking`] content to become ready.
+///
+/// The target's content already exists and is loading/applying off-stack,
+/// tagged with `SceneOwner { scene_id }` using the id reserved below, but not
+/// yet part of `SceneStack::entries`. `sync_scene_entity_visibility` keeps it
+/// hidden via the same readiness gate every other scene uses — this record
+/// only tracks what to do once that content stops loading.
+#[derive(Clone, Debug)]
+struct PendingSceneTransition {
+    scene_id: SceneId,
+    key: Option<SceneKey>,
+    source: SceneSource,
+    presentation: ScenePresentation,
+    clear_stack: bool,
+    close_current: bool,
+}
+
+/// Scene opens waiting for [`SceneLoadMode::Blocking`] content to become ready.
+#[derive(Debug, Default, Resource)]
+struct PendingSceneTransitions {
+    entries: Vec<PendingSceneTransition>,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn process_scene_commands(
     mut commands: MessageReader<SceneCommand>,
     mut stack: ResMut<SceneStack>,
+    mut pending_transitions: ResMut<PendingSceneTransitions>,
     mut added: MessageWriter<SceneAdded>,
     mut removed: MessageWriter<SceneRemoved>,
     mut focused: MessageWriter<SceneFocused>,
@@ -503,6 +656,7 @@ fn process_scene_commands(
         apply_scene_command(
             command,
             &mut stack,
+            &mut pending_transitions,
             &mut added,
             &mut removed,
             &mut load_requested,
@@ -517,27 +671,131 @@ fn process_scene_commands(
 fn apply_scene_command(
     command: SceneCommand,
     stack: &mut SceneStack,
+    pending_transitions: &mut PendingSceneTransitions,
     added: &mut MessageWriter<SceneAdded>,
     removed: &mut MessageWriter<SceneRemoved>,
     load_requested: &mut MessageWriter<SceneLoadRequested>,
 ) {
     match command {
-        SceneCommand::Open { source, options } => {
-            // Replacement options are applied before loading the new scene entry.
-            if options.clear_stack {
-                clear_stack(stack, removed);
-            } else if options.close_current {
-                close_current(stack, removed);
+        SceneCommand::Open { source, options } => match options.load_mode {
+            SceneLoadMode::Streaming => {
+                // Replacement options are applied before loading the new scene entry.
+                if options.clear_stack {
+                    clear_stack(stack, removed);
+                } else if options.close_current {
+                    close_current(stack, removed);
+                }
+                open_scene(source, options, stack, added, load_requested);
             }
-            open_scene(source, options, stack, added, load_requested);
-        }
+            SceneLoadMode::Blocking => {
+                queue_pending_scene_transition(
+                    source,
+                    options,
+                    stack,
+                    pending_transitions,
+                    load_requested,
+                );
+            }
+        },
         SceneCommand::CloseCurrent => close_current(stack, removed),
         SceneCommand::Close(target) => close_target(target, stack, removed),
         SceneCommand::Clear => clear_stack(stack, removed),
-        SceneCommand::ClearAndOpen { source, options } => {
-            clear_stack(stack, removed);
-            open_scene(source, options, stack, added, load_requested);
+        SceneCommand::ClearAndOpen { source, options } => match options.load_mode {
+            SceneLoadMode::Streaming => {
+                clear_stack(stack, removed);
+                open_scene(source, options, stack, added, load_requested);
+            }
+            SceneLoadMode::Blocking => {
+                // The clear must wait for activation too, or the current
+                // stack would go blank while the replacement is still
+                // loading — exactly the freeze this mode exists to avoid.
+                let mut blocking_options = options;
+                blocking_options.clear_stack = true;
+                queue_pending_scene_transition(
+                    source,
+                    blocking_options,
+                    stack,
+                    pending_transitions,
+                    load_requested,
+                );
+            }
+        },
+    }
+}
+
+/// Reserves a scene id, starts loading its content off-stack, and records a
+/// [`PendingSceneTransition`] for [`advance_pending_scene_transitions`] to
+/// activate once that content is ready.
+fn queue_pending_scene_transition(
+    source: SceneSource,
+    options: OpenSceneOptions,
+    stack: &mut SceneStack,
+    pending_transitions: &mut PendingSceneTransitions,
+    load_requested: &mut MessageWriter<SceneLoadRequested>,
+) {
+    let scene_id = stack.allocate_id();
+    load_requested.write(SceneLoadRequested {
+        scene_id,
+        source: source.clone(),
+    });
+    pending_transitions.entries.push(PendingSceneTransition {
+        scene_id,
+        key: options.key,
+        source,
+        presentation: options.presentation,
+        clear_stack: options.clear_stack,
+        close_current: options.close_current,
+    });
+}
+
+/// Activates pending blocking transitions whose content has stopped loading.
+///
+/// A failed load still activates here: [`SceneContentLoading`] is removed on
+/// failure too (see `bsn_assets.rs`), so a broken load surfaces as degraded
+/// content instead of blocking the transition forever.
+fn advance_pending_scene_transitions(
+    mut pending_transitions: ResMut<PendingSceneTransitions>,
+    mut stack: ResMut<SceneStack>,
+    mut added: MessageWriter<SceneAdded>,
+    mut removed: MessageWriter<SceneRemoved>,
+    mut focused: MessageWriter<SceneFocused>,
+    mut unfocused: MessageWriter<SceneUnfocused>,
+    loading_owners: Query<&SceneOwner, With<SceneContentLoading>>,
+) {
+    if pending_transitions.entries.is_empty() {
+        return;
+    }
+
+    let loading_scene_ids: HashSet<SceneId> =
+        loading_owners.iter().map(|owner| owner.scene_id).collect();
+    let mut activated_any_transition = false;
+
+    pending_transitions.entries.retain(|pending_transition| {
+        if loading_scene_ids.contains(&pending_transition.scene_id) {
+            return true;
         }
+
+        if pending_transition.clear_stack {
+            clear_stack(&mut stack, &mut removed);
+        } else if pending_transition.close_current {
+            close_current(&mut stack, &mut removed);
+        }
+        stack.entries.push(SceneStackEntry {
+            id: pending_transition.scene_id,
+            key: pending_transition.key.clone(),
+            source: pending_transition.source.clone(),
+            presentation: pending_transition.presentation,
+            flags: SceneRuntimeFlags::default(),
+        });
+        added.write(SceneAdded {
+            scene_id: pending_transition.scene_id,
+        });
+        activated_any_transition = true;
+        false
+    });
+
+    if activated_any_transition {
+        update_runtime_flags(&mut stack, &mut focused, &mut unfocused);
     }
 }
 
@@ -632,7 +890,13 @@ fn sync_scene_entity_visibility(
     stack: Res<SceneStack>,
     mut owned_visibilities: Query<(&SceneOwner, Option<&ChildOf>, &mut Visibility)>,
     owners: Query<&SceneOwner>,
+    loading_owners: Query<&SceneOwner, With<SceneContentLoading>>,
 ) {
+    // A scene stays hidden while any entity it owns is still loading,
+    // regardless of stack presentation, so content never renders mid-build.
+    let loading_scene_ids: HashSet<SceneId> =
+        loading_owners.iter().map(|owner| owner.scene_id).collect();
+
     for (scene_owner, parent_link, mut visibility) in &mut owned_visibilities {
         // Drive only scene-root entities; owned children follow through Bevy's
         // visibility inheritance, which keeps authored child visibility intact.
@@ -643,7 +907,8 @@ fn sync_scene_entity_visibility(
             continue;
         }
 
-        let scene_visibility = if stack.is_visible(scene_owner.scene_id) {
+        let scene_is_ready = !loading_scene_ids.contains(&scene_owner.scene_id);
+        let scene_visibility = if stack.is_visible(scene_owner.scene_id) && scene_is_ready {
             Visibility::Inherited
         } else {
             Visibility::Hidden
@@ -749,6 +1014,37 @@ mod tests {
                 key: SceneKey::new("pause_menu")
             }
         );
+    }
+
+    #[test]
+    fn preload_target_constructors_set_the_expected_mode() {
+        let background_target = ScenePreloadTarget::background(SceneSource::bsn_scene("a"));
+        assert_eq!(background_target.mode, ScenePreloadMode::Background);
+
+        let blocking_target = ScenePreloadTarget::blocking(SceneSource::bsn_scene("b"));
+        assert_eq!(blocking_target.mode, ScenePreloadMode::Blocking);
+    }
+
+    #[test]
+    fn preload_registry_returns_registered_targets_for_the_owner() {
+        let mut registry = ScenePreloadRegistry::default();
+        let gameplay_source = SceneSource::runtime("gameplay_level");
+        registry.register_preloads(
+            gameplay_source.clone(),
+            [ScenePreloadTarget::background(SceneSource::runtime(
+                "pause_menu",
+            ))],
+        );
+
+        assert_eq!(
+            registry.preload_targets(&gameplay_source),
+            &[ScenePreloadTarget::background(SceneSource::runtime(
+                "pause_menu"
+            ))]
+        );
+        assert!(registry
+            .preload_targets(&SceneSource::runtime("unregistered"))
+            .is_empty());
     }
 
     #[test]
@@ -1002,6 +1298,272 @@ mod tests {
             app.world().get::<Visibility>(owned_entity),
             Some(&Visibility::Inherited),
             "entities should become visible again once uncovered"
+        );
+    }
+
+    #[test]
+    fn loading_scene_entities_stay_hidden_even_when_stack_visible() {
+        let mut app = test_app();
+        app.world_mut()
+            .write_message(SceneCommand::open(SceneSource::runtime("gameplay")));
+        app.update();
+
+        let loading_entity = app
+            .world_mut()
+            .spawn((
+                SceneOwner {
+                    scene_id: SceneId(1),
+                },
+                SceneContentLoading,
+                Visibility::default(),
+            ))
+            .id();
+        app.update();
+
+        assert_eq!(
+            app.world().get::<Visibility>(loading_entity),
+            Some(&Visibility::Hidden),
+            "a scene-owned entity still loading must stay hidden even though the stack marks the scene visible"
+        );
+    }
+
+    #[test]
+    fn scene_becomes_visible_once_loading_marker_clears() {
+        let mut app = test_app();
+        app.world_mut()
+            .write_message(SceneCommand::open(SceneSource::runtime("gameplay")));
+        app.update();
+
+        let loading_entity = app
+            .world_mut()
+            .spawn((
+                SceneOwner {
+                    scene_id: SceneId(1),
+                },
+                SceneContentLoading,
+                Visibility::default(),
+            ))
+            .id();
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(loading_entity),
+            Some(&Visibility::Hidden)
+        );
+
+        app.world_mut()
+            .entity_mut(loading_entity)
+            .remove::<SceneContentLoading>();
+        app.update();
+
+        assert_eq!(
+            app.world().get::<Visibility>(loading_entity),
+            Some(&Visibility::Inherited),
+            "the scene should reveal once nothing it owns is still loading"
+        );
+    }
+
+    #[test]
+    fn loading_marker_on_child_entity_keeps_whole_scene_hidden() {
+        let mut app = test_app();
+        app.world_mut()
+            .write_message(SceneCommand::open(SceneSource::runtime("gameplay")));
+        app.update();
+
+        let scene_owner = SceneOwner {
+            scene_id: SceneId(1),
+        };
+        let root_entity = app
+            .world_mut()
+            .spawn((scene_owner, Visibility::default()))
+            .id();
+        app.world_mut()
+            .spawn((scene_owner, SceneContentLoading, ChildOf(root_entity)));
+        app.update();
+
+        assert_eq!(
+            app.world().get::<Visibility>(root_entity),
+            Some(&Visibility::Hidden),
+            "a loading descendant anywhere in the owned subtree must hide the whole scene root"
+        );
+    }
+
+    #[test]
+    fn covered_ready_scene_stays_hidden_from_presentation_not_readiness() {
+        let mut app = test_app();
+        app.world_mut()
+            .write_message(SceneCommand::open(SceneSource::runtime("gameplay")));
+        app.update();
+
+        let ready_entity = app
+            .world_mut()
+            .spawn((
+                SceneOwner {
+                    scene_id: SceneId(1),
+                },
+                Visibility::default(),
+            ))
+            .id();
+        app.world_mut()
+            .write_message(SceneCommand::open(SceneSource::runtime("main-menu")));
+        app.update();
+
+        assert_eq!(
+            app.world().get::<Visibility>(ready_entity),
+            Some(&Visibility::Hidden),
+            "a ready scene covered by another scene must still be hidden by presentation"
+        );
+    }
+
+    #[test]
+    fn blocking_open_does_not_appear_until_content_stops_loading() {
+        let mut app = test_app();
+        // Spawn the loading-marked content before the command is even
+        // processed, so `advance_pending_scene_transitions` sees it as still
+        // loading on the very same frame the transition is registered
+        // instead of finding nothing and activating immediately.
+        let expected_scene_id = app.world().resource::<SceneStack>().next_scene_id();
+        let content_entity = app
+            .world_mut()
+            .spawn((
+                SceneOwner {
+                    scene_id: expected_scene_id,
+                },
+                SceneContentLoading,
+            ))
+            .id();
+
+        app.world_mut()
+            .write_message(SceneCommand::open_with_options(
+                SceneSource::runtime("main-menu"),
+                OpenSceneOptions::default().with_load_mode(SceneLoadMode::Blocking),
+            ));
+        app.update();
+
+        assert!(
+            app.world().resource::<SceneStack>().is_empty(),
+            "a blocking open must not appear on the stack while its content is still loading"
+        );
+
+        app.update();
+        assert!(
+            app.world().resource::<SceneStack>().is_empty(),
+            "still loading, must not activate yet"
+        );
+
+        app.world_mut()
+            .entity_mut(content_entity)
+            .remove::<SceneContentLoading>();
+        app.update();
+
+        let stack = app.world().resource::<SceneStack>();
+        assert_eq!(stack.len(), 1);
+        assert_eq!(
+            stack.current().map(|entry| entry.id),
+            Some(expected_scene_id)
+        );
+    }
+
+    #[test]
+    fn current_scene_stays_active_while_blocking_transition_is_pending() {
+        let mut app = test_app();
+        app.world_mut()
+            .write_message(SceneCommand::open(SceneSource::runtime("gameplay")));
+        app.update();
+
+        let expected_scene_id = app.world().resource::<SceneStack>().next_scene_id();
+        app.world_mut().spawn((
+            SceneOwner {
+                scene_id: expected_scene_id,
+            },
+            SceneContentLoading,
+        ));
+
+        app.world_mut()
+            .write_message(SceneCommand::open_with_options(
+                SceneSource::runtime("pause-menu"),
+                OpenSceneOptions::default().with_load_mode(SceneLoadMode::Blocking),
+            ));
+        app.update();
+
+        let stack = app.world().resource::<SceneStack>();
+        assert_eq!(stack.len(), 1, "the blocking target must not be pushed yet");
+        let gameplay = stack
+            .current()
+            .expect("gameplay should remain the only stack entry");
+        assert!(
+            gameplay.flags.visible
+                && gameplay.flags.interactive
+                && gameplay.flags.updating
+                && gameplay.flags.focused,
+            "the frame loop must never stall for a blocking load: the current scene stays fully active the whole wait"
+        );
+    }
+
+    #[test]
+    fn blocking_open_with_no_loading_content_activates_immediately() {
+        let mut app = test_app();
+        app.world_mut()
+            .write_message(SceneCommand::open_with_options(
+                SceneSource::runtime("instant-menu"),
+                OpenSceneOptions::default().with_load_mode(SceneLoadMode::Blocking),
+            ));
+        app.update();
+
+        assert_eq!(
+            app.world().resource::<SceneStack>().len(),
+            1,
+            "a target with nothing marked loading (including a failed load, which also clears the marker) should activate right away rather than waiting forever"
+        );
+    }
+
+    #[test]
+    fn clear_and_open_blocking_defers_clearing_until_activation() {
+        let mut app = test_app();
+        app.world_mut()
+            .write_message(SceneCommand::open(SceneSource::runtime("gameplay")));
+        app.update();
+
+        let expected_scene_id = app.world().resource::<SceneStack>().next_scene_id();
+        let content_entity = app
+            .world_mut()
+            .spawn((
+                SceneOwner {
+                    scene_id: expected_scene_id,
+                },
+                SceneContentLoading,
+            ))
+            .id();
+        app.world_mut().write_message(SceneCommand::ClearAndOpen {
+            source: SceneSource::runtime("main-menu"),
+            options: OpenSceneOptions::default().with_load_mode(SceneLoadMode::Blocking),
+        });
+        app.update();
+
+        let stack = app.world().resource::<SceneStack>();
+        assert_eq!(
+            stack.len(),
+            1,
+            "gameplay must stay on the stack until the blocking replacement is ready"
+        );
+        assert_eq!(
+            stack.current().map(|entry| entry.source.clone()),
+            Some(SceneSource::runtime("gameplay"))
+        );
+
+        app.world_mut()
+            .entity_mut(content_entity)
+            .remove::<SceneContentLoading>();
+        app.update();
+
+        let stack = app.world().resource::<SceneStack>();
+        assert_eq!(
+            stack.len(),
+            1,
+            "clearing should finally happen once the replacement activates"
+        );
+        assert_eq!(
+            stack.current().map(|entry| entry.id),
+            Some(expected_scene_id)
         );
     }
 
