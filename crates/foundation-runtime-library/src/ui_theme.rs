@@ -891,8 +891,14 @@ mod tests {
         let theme = sample_theme();
 
         assert_eq!(theme.color(FoundationUiColorToken::Accent), theme.accent);
-        assert_eq!(theme.color(FoundationUiColorToken::TextPrimary), theme.text_primary);
-        assert_eq!(theme.color(FoundationUiColorToken::Transparent), theme.transparent);
+        assert_eq!(
+            theme.color(FoundationUiColorToken::TextPrimary),
+            theme.text_primary
+        );
+        assert_eq!(
+            theme.color(FoundationUiColorToken::Transparent),
+            theme.transparent
+        );
     }
 
     #[test]
@@ -902,14 +908,19 @@ mod tests {
         let translucent_accent = theme.color_alpha(FoundationUiColorToken::Accent, 0.5);
 
         assert_eq!(translucent_accent.alpha(), 0.5);
-        assert_eq!(translucent_accent.to_srgba().red, theme.accent.to_srgba().red);
+        assert_eq!(
+            translucent_accent.to_srgba().red,
+            theme.accent.to_srgba().red
+        );
     }
 
     #[test]
     fn space_accessor_resolves_every_token_in_rank_order() {
         let theme = sample_theme();
 
-        assert!(theme.space(FoundationUiSpaceToken::Zero) < theme.space(FoundationUiSpaceToken::Xxs));
+        assert!(
+            theme.space(FoundationUiSpaceToken::Zero) < theme.space(FoundationUiSpaceToken::Xxs)
+        );
         assert!(theme.space(FoundationUiSpaceToken::Xxs) < theme.space(FoundationUiSpaceToken::Xs));
         assert!(theme.space(FoundationUiSpaceToken::Xs) < theme.space(FoundationUiSpaceToken::Sm));
         assert!(theme.space(FoundationUiSpaceToken::Sm) < theme.space(FoundationUiSpaceToken::Md));
@@ -922,27 +933,59 @@ mod tests {
     fn font_size_accessor_resolves_every_token_in_rank_order() {
         let theme = sample_theme();
 
-        assert!(theme.font_size(FoundationUiFontSizeToken::Xxs) < theme.font_size(FoundationUiFontSizeToken::Xs));
-        assert!(theme.font_size(FoundationUiFontSizeToken::Xs) < theme.font_size(FoundationUiFontSizeToken::Sm));
-        assert!(theme.font_size(FoundationUiFontSizeToken::Sm) < theme.font_size(FoundationUiFontSizeToken::Md));
-        assert!(theme.font_size(FoundationUiFontSizeToken::Md) < theme.font_size(FoundationUiFontSizeToken::Lg));
-        assert!(theme.font_size(FoundationUiFontSizeToken::Lg) < theme.font_size(FoundationUiFontSizeToken::Xl));
-        assert!(theme.font_size(FoundationUiFontSizeToken::Xl) < theme.font_size(FoundationUiFontSizeToken::Xxl));
-        assert!(theme.font_size(FoundationUiFontSizeToken::Xxl) < theme.font_size(FoundationUiFontSizeToken::XxlPlus));
-        assert!(theme.font_size(FoundationUiFontSizeToken::XxlPlus) < theme.font_size(FoundationUiFontSizeToken::Xxxl));
-        assert!(theme.font_size(FoundationUiFontSizeToken::Xxxl) < theme.font_size(FoundationUiFontSizeToken::XxxlPlus));
-        assert!(theme.font_size(FoundationUiFontSizeToken::XxxlPlus) < theme.font_size(FoundationUiFontSizeToken::Xxxxl));
+        assert!(
+            theme.font_size(FoundationUiFontSizeToken::Xxs)
+                < theme.font_size(FoundationUiFontSizeToken::Xs)
+        );
+        assert!(
+            theme.font_size(FoundationUiFontSizeToken::Xs)
+                < theme.font_size(FoundationUiFontSizeToken::Sm)
+        );
+        assert!(
+            theme.font_size(FoundationUiFontSizeToken::Sm)
+                < theme.font_size(FoundationUiFontSizeToken::Md)
+        );
+        assert!(
+            theme.font_size(FoundationUiFontSizeToken::Md)
+                < theme.font_size(FoundationUiFontSizeToken::Lg)
+        );
+        assert!(
+            theme.font_size(FoundationUiFontSizeToken::Lg)
+                < theme.font_size(FoundationUiFontSizeToken::Xl)
+        );
+        assert!(
+            theme.font_size(FoundationUiFontSizeToken::Xl)
+                < theme.font_size(FoundationUiFontSizeToken::Xxl)
+        );
+        assert!(
+            theme.font_size(FoundationUiFontSizeToken::Xxl)
+                < theme.font_size(FoundationUiFontSizeToken::XxlPlus)
+        );
+        assert!(
+            theme.font_size(FoundationUiFontSizeToken::XxlPlus)
+                < theme.font_size(FoundationUiFontSizeToken::Xxxl)
+        );
+        assert!(
+            theme.font_size(FoundationUiFontSizeToken::Xxxl)
+                < theme.font_size(FoundationUiFontSizeToken::XxxlPlus)
+        );
+        assert!(
+            theme.font_size(FoundationUiFontSizeToken::XxxlPlus)
+                < theme.font_size(FoundationUiFontSizeToken::Xxxxl)
+        );
     }
 
     #[test]
     fn typography_bundles_font_size_and_color() {
         let theme = sample_theme();
 
-        let (heading1_size, heading1_color) = theme.typography(FoundationUiTypographyToken::Heading1);
+        let (heading1_size, heading1_color) =
+            theme.typography(FoundationUiTypographyToken::Heading1);
         assert_eq!(heading1_size, theme.font_size_xxxxl);
         assert_eq!(heading1_color, theme.text_primary);
 
-        let (button_label_size, button_label_color) = theme.typography(FoundationUiTypographyToken::ButtonLabel);
+        let (button_label_size, button_label_color) =
+            theme.typography(FoundationUiTypographyToken::ButtonLabel);
         assert_eq!(button_label_size, theme.font_size_lg);
         assert_eq!(button_label_color, theme.text_primary);
     }
@@ -951,8 +994,14 @@ mod tests {
     fn default_theme_is_a_loud_placeholder_not_a_real_palette() {
         let placeholder = FoundationUiTheme::default();
 
-        assert_eq!(placeholder.color(FoundationUiColorToken::Accent), Color::srgb(1.0, 0.0, 1.0));
-        assert_eq!(placeholder.color(FoundationUiColorToken::Background), Color::srgb(1.0, 0.0, 1.0));
+        assert_eq!(
+            placeholder.color(FoundationUiColorToken::Accent),
+            Color::srgb(1.0, 0.0, 1.0)
+        );
+        assert_eq!(
+            placeholder.color(FoundationUiColorToken::Background),
+            Color::srgb(1.0, 0.0, 1.0)
+        );
         assert_eq!(
             placeholder.space(FoundationUiSpaceToken::Zero),
             placeholder.space(FoundationUiSpaceToken::Xxl)
@@ -965,7 +1014,10 @@ mod tests {
 
         let theme = load_ui_theme_from_file(&missing_path);
 
-        assert_eq!(theme.color(FoundationUiColorToken::Accent), Color::srgb(1.0, 0.0, 1.0));
+        assert_eq!(
+            theme.color(FoundationUiColorToken::Accent),
+            Color::srgb(1.0, 0.0, 1.0)
+        );
     }
 
     #[test]
@@ -975,7 +1027,10 @@ mod tests {
 
         let theme = load_ui_theme_from_file(&theme_file_path);
 
-        assert_eq!(theme.color(FoundationUiColorToken::Accent), Color::srgb(1.0, 0.0, 1.0));
+        assert_eq!(
+            theme.color(FoundationUiColorToken::Accent),
+            Color::srgb(1.0, 0.0, 1.0)
+        );
         let _ = std::fs::remove_file(theme_file_path);
     }
 
@@ -1046,10 +1101,16 @@ sm = 2.0
 
         let theme = load_ui_theme_from_file(&theme_file_path);
 
-        assert_eq!(theme.color(FoundationUiColorToken::Accent), Color::srgb(0.984, 0.749, 0.141));
+        assert_eq!(
+            theme.color(FoundationUiColorToken::Accent),
+            Color::srgb(0.984, 0.749, 0.141)
+        );
         assert_eq!(theme.space(FoundationUiSpaceToken::Xl), 16.0);
         assert_eq!(theme.font_size(FoundationUiFontSizeToken::Xxxxl), 28.0);
-        assert_eq!(theme.border_width(FoundationUiBorderWidthToken::Hairline), 1.0);
+        assert_eq!(
+            theme.border_width(FoundationUiBorderWidthToken::Hairline),
+            1.0
+        );
         assert_eq!(theme.border_radius(FoundationUiBorderRadiusToken::Sm), 2.0);
 
         let _ = std::fs::remove_file(theme_file_path);
@@ -1070,7 +1131,10 @@ sm = 2.0
             .id();
         app.update();
 
-        assert_eq!(app.world().get::<BackgroundColor>(entity).unwrap().0, sample_theme().accent);
+        assert_eq!(
+            app.world().get::<BackgroundColor>(entity).unwrap().0,
+            sample_theme().accent
+        );
     }
 
     #[test]
@@ -1172,11 +1236,17 @@ sm = 2.0
 
         let entity = app
             .world_mut()
-            .spawn((FoundationUiThemedText(FoundationUiColorToken::TextMuted), TextColor(Color::NONE)))
+            .spawn((
+                FoundationUiThemedText(FoundationUiColorToken::TextMuted),
+                TextColor(Color::NONE),
+            ))
             .id();
         app.update();
 
-        assert_eq!(app.world().get::<TextColor>(entity).unwrap().0, sample_theme().text_muted);
+        assert_eq!(
+            app.world().get::<TextColor>(entity).unwrap().0,
+            sample_theme().text_muted
+        );
     }
 
     #[test]
@@ -1195,9 +1265,16 @@ sm = 2.0
             .id();
         app.update();
 
-        let (expected_size, expected_color) = sample_theme().typography(FoundationUiTypographyToken::Heading3);
-        assert_eq!(app.world().get::<TextFont>(entity).unwrap().font_size, FontSize::Px(expected_size));
-        assert_eq!(app.world().get::<TextColor>(entity).unwrap().0, expected_color);
+        let (expected_size, expected_color) =
+            sample_theme().typography(FoundationUiTypographyToken::Heading3);
+        assert_eq!(
+            app.world().get::<TextFont>(entity).unwrap().font_size,
+            FontSize::Px(expected_size)
+        );
+        assert_eq!(
+            app.world().get::<TextColor>(entity).unwrap().0,
+            expected_color
+        );
     }
 
     #[test]
@@ -1208,7 +1285,10 @@ sm = 2.0
 
         let entity = app
             .world_mut()
-            .spawn((FoundationUiThemedFontSize(FoundationUiFontSizeToken::Xxl), TextFont::default()))
+            .spawn((
+                FoundationUiThemedFontSize(FoundationUiFontSizeToken::Xxl),
+                TextFont::default(),
+            ))
             .id();
         app.update();
 
@@ -1239,7 +1319,10 @@ sm = 2.0
         let node = app.world().get::<Node>(entity).unwrap();
         assert_eq!(
             node.padding,
-            UiRect::axes(Val::Px(sample_theme().space_xl), Val::Px(sample_theme().space_sm))
+            UiRect::axes(
+                Val::Px(sample_theme().space_xl),
+                Val::Px(sample_theme().space_sm)
+            )
         );
     }
 
@@ -1274,12 +1357,18 @@ sm = 2.0
 
         let entity = app
             .world_mut()
-            .spawn((FoundationUiThemedBorderWidth(FoundationUiBorderWidthToken::Thick), Node::default()))
+            .spawn((
+                FoundationUiThemedBorderWidth(FoundationUiBorderWidthToken::Thick),
+                Node::default(),
+            ))
             .id();
         app.update();
 
         let node = app.world().get::<Node>(entity).unwrap();
-        assert_eq!(node.border, UiRect::all(Val::Px(sample_theme().border_width_thick)));
+        assert_eq!(
+            node.border,
+            UiRect::all(Val::Px(sample_theme().border_width_thick))
+        );
     }
 
     #[test]
@@ -1290,12 +1379,18 @@ sm = 2.0
 
         let entity = app
             .world_mut()
-            .spawn((FoundationUiThemedBorderRadius(FoundationUiBorderRadiusToken::Sm), Node::default()))
+            .spawn((
+                FoundationUiThemedBorderRadius(FoundationUiBorderRadiusToken::Sm),
+                Node::default(),
+            ))
             .id();
         app.update();
 
         let node = app.world().get::<Node>(entity).unwrap();
-        assert_eq!(node.border_radius, BorderRadius::all(Val::Px(sample_theme().border_radius_sm)));
+        assert_eq!(
+            node.border_radius,
+            BorderRadius::all(Val::Px(sample_theme().border_radius_sm))
+        );
     }
 
     #[test]
@@ -1312,7 +1407,10 @@ sm = 2.0
             ))
             .id();
         app.update();
-        assert_eq!(app.world().get::<BackgroundColor>(entity).unwrap().0, sample_theme().surface);
+        assert_eq!(
+            app.world().get::<BackgroundColor>(entity).unwrap().0,
+            sample_theme().surface
+        );
 
         let swapped_surface_color = Color::srgb(0.99, 0.01, 0.5);
         app.world_mut().resource_mut::<FoundationUiTheme>().surface = swapped_surface_color;

@@ -438,7 +438,11 @@ fn refresh_perf_overlay_text(
     state: Res<FoundationPerfOverlayState>,
     diagnostics: Res<DiagnosticsStore>,
     averages: Res<FoundationPerfOverlayRunningAverages>,
-    mut cells: Query<(&FoundationPerfOverlayLine, &FoundationPerfOverlayColumn, &mut Text)>,
+    mut cells: Query<(
+        &FoundationPerfOverlayLine,
+        &FoundationPerfOverlayColumn,
+        &mut Text,
+    )>,
 ) {
     if !state.visible {
         return;
@@ -467,9 +471,9 @@ fn current_value(line: FoundationPerfOverlayLine, diagnostics: &DiagnosticsStore
         FoundationPerfOverlayLine::FrameTime => diagnostics
             .get(&FrameTimeDiagnosticsPlugin::FRAME_TIME)
             .and_then(Diagnostic::smoothed),
-        FoundationPerfOverlayLine::CpuProcess => {
-            diagnostics.get(&CPU_PROCESS_FRAME_TIME).and_then(Diagnostic::smoothed)
-        }
+        FoundationPerfOverlayLine::CpuProcess => diagnostics
+            .get(&CPU_PROCESS_FRAME_TIME)
+            .and_then(Diagnostic::smoothed),
         FoundationPerfOverlayLine::CpuRender => {
             let (_, _, render_cpu_total_ms, render_cpu_sample_count) =
                 sum_render_pass_diagnostics(diagnostics);
@@ -518,7 +522,12 @@ fn sum_render_pass_diagnostics(diagnostics: &DiagnosticsStore) -> (f64, usize, f
         }
     }
 
-    (gpu_total_ms, gpu_sample_count, render_cpu_total_ms, render_cpu_sample_count)
+    (
+        gpu_total_ms,
+        gpu_sample_count,
+        render_cpu_total_ms,
+        render_cpu_sample_count,
+    )
 }
 
 /// Toggles the performance-stat overlay on/off.
@@ -622,7 +631,10 @@ mod tests {
         diagnostics.add(diagnostic_with_value("fps", 60.0));
         diagnostics.add(diagnostic_with_value("frame_time", 16.6));
 
-        assert_eq!(current_value(FoundationPerfOverlayLine::Fps, &diagnostics), Some(60.0));
+        assert_eq!(
+            current_value(FoundationPerfOverlayLine::Fps, &diagnostics),
+            Some(60.0)
+        );
         assert_eq!(
             current_value(FoundationPerfOverlayLine::FrameTime, &diagnostics),
             Some(16.6)
@@ -632,7 +644,10 @@ mod tests {
     #[test]
     fn current_value_reads_the_custom_cpu_process_diagnostic() {
         let mut diagnostics = DiagnosticsStore::default();
-        diagnostics.add(diagnostic_with_value("foundation/cpu_process_frame_time", 4.2));
+        diagnostics.add(diagnostic_with_value(
+            "foundation/cpu_process_frame_time",
+            4.2,
+        ));
 
         assert_eq!(
             current_value(FoundationPerfOverlayLine::CpuProcess, &diagnostics),
@@ -645,7 +660,10 @@ mod tests {
         let mut diagnostics = DiagnosticsStore::default();
         diagnostics.add(diagnostic_with_value("process/mem_usage", 0.5));
 
-        assert_eq!(current_value(FoundationPerfOverlayLine::Memory, &diagnostics), Some(512.0));
+        assert_eq!(
+            current_value(FoundationPerfOverlayLine::Memory, &diagnostics),
+            Some(512.0)
+        );
     }
 
     #[test]
@@ -672,8 +690,14 @@ mod tests {
         let mut diagnostics = DiagnosticsStore::default();
         diagnostics.add(diagnostic_with_value("render/main_pass/elapsed_cpu", 1.25));
 
-        assert_eq!(current_value(FoundationPerfOverlayLine::CpuRender, &diagnostics), Some(1.25));
-        assert_eq!(current_value(FoundationPerfOverlayLine::GpuRender, &diagnostics), None);
+        assert_eq!(
+            current_value(FoundationPerfOverlayLine::CpuRender, &diagnostics),
+            Some(1.25)
+        );
+        assert_eq!(
+            current_value(FoundationPerfOverlayLine::GpuRender, &diagnostics),
+            None
+        );
     }
 
     #[test]
@@ -684,9 +708,15 @@ mod tests {
     #[test]
     fn format_uses_expected_precision_per_stat() {
         assert_eq!(FoundationPerfOverlayLine::Fps.format(Some(60.04)), "60.0");
-        assert_eq!(FoundationPerfOverlayLine::Entities.format(Some(596.0)), "596");
+        assert_eq!(
+            FoundationPerfOverlayLine::Entities.format(Some(596.0)),
+            "596"
+        );
         assert_eq!(FoundationPerfOverlayLine::Memory.format(Some(523.7)), "524");
-        assert_eq!(FoundationPerfOverlayLine::CpuProcess.format(Some(23.128)), "23.13");
+        assert_eq!(
+            FoundationPerfOverlayLine::CpuProcess.format(Some(23.128)),
+            "23.13"
+        );
     }
 
     #[test]
@@ -721,8 +751,9 @@ mod tests {
             .advance_by(std::time::Duration::from_millis(400));
         app.update();
         assert_eq!(
-            app.world().resource::<FoundationPerfOverlayRunningAverages>().last_averages
-                [FoundationPerfOverlayLine::Fps.index()],
+            app.world()
+                .resource::<FoundationPerfOverlayRunningAverages>()
+                .last_averages[FoundationPerfOverlayLine::Fps.index()],
             None
         );
 
@@ -732,8 +763,9 @@ mod tests {
             .advance_by(std::time::Duration::from_millis(700));
         app.update();
         assert_eq!(
-            app.world().resource::<FoundationPerfOverlayRunningAverages>().last_averages
-                [FoundationPerfOverlayLine::Fps.index()],
+            app.world()
+                .resource::<FoundationPerfOverlayRunningAverages>()
+                .last_averages[FoundationPerfOverlayLine::Fps.index()],
             Some(60.0)
         );
     }
