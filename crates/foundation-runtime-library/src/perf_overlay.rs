@@ -35,17 +35,11 @@ use bevy::{
 };
 
 /// Toggled by the `stat.perf` console command to show/hide the performance overlay.
-#[derive(Clone, Copy, Debug, Resource, Reflect)]
+#[derive(Clone, Copy, Debug, Default, Resource, Reflect)]
 #[reflect(Resource)]
 pub struct FoundationPerfOverlayState {
     /// Whether the overlay is currently shown.
     pub visible: bool,
-}
-
-impl Default for FoundationPerfOverlayState {
-    fn default() -> Self {
-        Self { visible: false }
-    }
 }
 
 /// Wall-clock timestamp recorded at the start of the main app's `First`
