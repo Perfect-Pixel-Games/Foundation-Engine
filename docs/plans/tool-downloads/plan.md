@@ -18,6 +18,8 @@ Following on from the performance-diagnostics work, the user asked whether Tracy
 ## Feature Summary
 Adds a `foundation-build tools install <name>` (and `tools list`) subcommand that downloads a known external developer tool's prebuilt release archive for the current OS, verifies its checksum, extracts the needed executable, and installs it into a shared per-user cache directory — idempotently, so repeat calls are instant no-ops. Ships with one known tool (`tracy`, the Tracy profiler GUI) but is structured so a second known tool is a small, additive change.
 
+**Addendum (same day, post-implementation):** the user asked for a way to launch an installed tool directly from a game's own directory without knowing its install path or having it on `PATH`. Added `foundation-build tools run <name>`, which calls the same `install()` (installing first if needed, idempotent no-op otherwise) and then launches the executable **detached** -- it does not wait for the tool to exit, since Tracy is a GUI profiler meant to stay open while the caller keeps working in their terminal, not a command whose completion the shell should block on. No argument forwarding in this version (YAGNI -- Tracy needs none to open).
+
 ## Feature Area Classification
 - Area: `engine`
 - Primary area: `engine`

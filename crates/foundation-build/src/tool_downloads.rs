@@ -12,6 +12,7 @@ use std::{
     fs,
     io::{self, Read},
     path::{Path, PathBuf},
+    process::Command,
 };
 
 use sha2::{Digest, Sha256};
@@ -336,14 +337,32 @@ fn list_known_tools() -> Vec<(&'static str, &'static str, bool)> {
         .collect()
 }
 
+/// Launches an installed tool's executable without waiting for it to exit.
+/// GUI tools like the Tracy profiler are meant to stay open while the caller
+/// keeps working in their own terminal, so this deliberately calls `spawn()`
+/// rather than `output()`/`status()`, which would block until the launched
+/// process exits.
+fn launch_detached(executable_path: &Path) -> Result<(), String> {
+    Command::new(executable_path)
+        .spawn()
+        .map_err(|spawn_error| {
+            format!(
+                "Failed to launch `{}`: {spawn_error}",
+                executable_path.display()
+            )
+        })?;
+    Ok(())
+}
+
 /// Entry point for the `tools` command family (`tools install <name>`,
-/// `tools list`), called from [`crate::run`] before any game-project
-/// resolution happens -- installing a tool has nothing to do with any
-/// specific game.
+/// `tools list`, `tools run <name>`), called from [`crate::run`] before any
+/// game-project resolution happens -- installing or launching a tool has
+/// nothing to do with any specific game.
 pub(crate) fn run_tools_command(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
     let Some(tools_subcommand) = arguments.next() else {
         return Err(
-            "Expected `install <tool-name>` or `list` after `tools`. Use `--help` for usage."
+            "Expected `install <tool-name>`, `list`, or `run <tool-name>` after `tools`. Use \
+             `--help` for usage."
                 .to_string(),
         );
     };
@@ -369,8 +388,18 @@ pub(crate) fn run_tools_command(mut arguments: impl Iterator<Item = String>) -> 
             }
             Ok(())
         }
+        "run" => {
+            let tool_name = arguments.next().ok_or_else(|| {
+                "Expected a tool name after `tools run`. Use `--help` for usage.".to_string()
+            })?;
+            let tool = KnownTool::parse(&tool_name)?;
+            let installed_path = install(tool)?;
+            launch_detached(&installed_path)?;
+            println!("Launched {}", installed_path.display());
+            Ok(())
+        }
         unknown_tools_subcommand => Err(format!(
-            "Unknown `tools` subcommand `{unknown_tools_subcommand}`. Expected `install` or `list`."
+            "Unknown `tools` subcommand `{unknown_tools_subcommand}`. Expected `install`, `list`, or `run`."
         )),
     }
 }
@@ -431,6 +460,19 @@ mod tests {
     fn run_tools_command_rejects_install_with_an_unknown_tool_name() {
         let result =
             run_tools_command(vec!["install".to_string(), "renderdoc".to_string()].into_iter());
+        assert!(result.unwrap_err().contains("renderdoc"));
+    }
+
+    #[test]
+    fn run_tools_command_rejects_run_without_a_tool_name() {
+        let result = run_tools_command(vec!["run".to_string()].into_iter());
+        assert!(result.unwrap_err().contains("tool name"));
+    }
+
+    #[test]
+    fn run_tools_command_rejects_run_with_an_unknown_tool_name() {
+        let result =
+            run_tools_command(vec!["run".to_string(), "renderdoc".to_string()].into_iter());
         assert!(result.unwrap_err().contains("renderdoc"));
     }
 }

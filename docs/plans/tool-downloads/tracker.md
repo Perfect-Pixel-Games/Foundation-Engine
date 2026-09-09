@@ -109,6 +109,34 @@
 - One implementation deviation from the plan, recorded above: switched from `ureq`'s default crate-level TLS (bundled root CAs) to an explicit `Agent` using `RootCerts::PlatformVerifier`, after a real run on this machine hit a certificate trust failure the plan didn't anticipate.
 - Not validated on this machine (Windows-only environment): the Linux code path (flat-file extraction + exec-bit preservation). Recommend a real Linux run before considering Linux support fully proven, if that's feasible before merge.
 
+## Phase 4: `tools run <name>` launcher
+**Status:** Done
+**Goal:** `foundation-build tools run <name>` installs the tool if needed and launches it detached, without blocking the caller's terminal.
+
+### Tasks
+- [x] Add `launch_detached(executable_path)` using `std::process::Command::spawn()` (not `.wait()`/`.output()`, so it doesn't block)
+  - Status: Done
+- [x] Add `"run"` verb to `run_tools_command`'s dispatch, reusing `install(tool)`
+  - Status: Done
+- [x] Update `print_usage()` with the new verb/example
+  - Status: Done
+- [x] Unit tests: `run` rejects missing/unknown tool name the same way `install` does
+  - Status: Done
+- [x] Manual validation: `tools run tracy` from a directory other than the engine checkout, confirm it installs-if-missing, launches, and the calling command returns immediately
+  - Status: Done — ran `engine/target/debug/foundation-build.exe tools run tracy` from the Last Beacon repo root (not the engine checkout); it printed `Launched <path>` and returned immediately (exit code 0, no hang); confirmed via `tasklist` that `tracy-profiler.exe` was genuinely running, then closed it.
+
+### Validation
+- Format: Pass (`cargo fmt --all`)
+- Lint: Pass (`engine\scripts\lint-project.cmd`, `-D warnings`)
+- Tests: Pass (`engine\scripts\test-project.cmd`: 154 + 19 = 173 tests total across the workspace, 0 failed; `foundation-build` grew from 17 to 19 tests with the 4 new `run`-verb tests)
+- Build: Pass (`engine\scripts\compile-project.cmd`)
+- Documentation generation: Pass (`engine\scripts\doc-project.cmd`) — same pre-existing unrelated `perf_overlay.rs` warning as Phase 3, not fixed here (out of scope)
+- Full validation wrapper: Pass (covered by the individual steps above)
+- User confirmation: Done — manual validation above confirmed working
+
+### Notes
+- None
+
 ## Postponed Work
 - macOS support: deferred — nothing else in this codebase targets macOS yet, and Tracy's macOS release is structurally different (a `.app` bundle tree vs. a flat executable), which would add real complexity for a platform not otherwise supported.
 - `--version` override for `tools install`: deferred (YAGNI) until a second concrete need for a non-pinned version appears.
@@ -119,3 +147,4 @@
 - `2026-09-09`: Brainstormed with user following the performance-diagnostics work. Ruled out git submodules (release binaries aren't part of a repo's git history) and package-manager wrapping (version drift, uneven Linux coverage) in favor of a direct-from-GitHub-releases download. Verified real Tracy v0.14.1 release asset layout and computed real SHA-256 digests for the Windows/Linux assets via `gh api`/`curl`/`sha256sum`. User confirmed engine-only scope (matches existing Windows+Linux-only platform support; macOS's `.app` bundle structure would add real complexity for no current benefit) and asked to keep this work on the existing `feature/performance-diagnostics` branch rather than opening a new one.
 - `2026-09-09`: Plan and tracker created under `engine/docs/plans/tool-downloads/`.
 - `2026-09-09`: Implemented all 3 phases. Hit and fixed a real TLS trust issue (switched to `RootCerts::PlatformVerifier`). Ran full validation (format/lint/test/compile/doc) — all pass. Manually validated a real `tools install tracy` run end to end on this machine, including launching the installed binary.
+- `2026-09-09`: Added Phase 4, `tools run <name>` — installs if needed then launches detached. Ran full validation again (all pass, 19 `foundation-build` tests) and manually confirmed a real `tools run tracy` invocation from the Last Beacon repo root (not the engine checkout) launches and returns immediately.

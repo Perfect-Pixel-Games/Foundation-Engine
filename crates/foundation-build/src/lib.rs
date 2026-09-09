@@ -64,6 +64,7 @@ fn print_usage() {
     println!("  cargo run -p foundation-build -- run     (--game <name>|--project <path>) [--platform <alias>] [--configuration <debug|test|shipping>] [--target <game|game-editor>] [-- <game arguments>]");
     println!("  cargo run -p foundation-build -- tools install <tool-name>");
     println!("  cargo run -p foundation-build -- tools list");
+    println!("  cargo run -p foundation-build -- tools run <tool-name>");
     println!("Examples:");
     println!("  cargo run -p foundation-build -- run --game template-game");
     println!("  cargo run -p foundation-build -- run --project ../template-game/game");
@@ -72,6 +73,7 @@ fn print_usage() {
     println!("  cargo run -p foundation-build -- package --project ../template-game/game --platform linux-x64 --configuration shipping --target game");
     println!("  cargo run -p foundation-build -- tools install tracy");
     println!("  cargo run -p foundation-build -- tools list");
+    println!("  cargo run -p foundation-build -- tools run tracy");
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
