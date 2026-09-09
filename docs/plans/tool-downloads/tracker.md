@@ -137,14 +137,47 @@
 ### Notes
 - None
 
+## Phase 5: Generic `--features` passthrough + `scripts\profile.cmd`
+**Status:** Done
+**Goal:** A single command from the game directory launches Tracy and runs the game with profiling enabled.
+
+### Tasks
+- [x] Add `extra_feature_names: Vec<String>` to `BuildInvocation`/`BuildRequest`, parsed from a new `--features <name1,name2>` flag
+  - Status: Done
+- [x] Make `cargo_feature_arguments()` additive: Foundation's own `dev-tools`/`editor` selection plus any `--features` names, still emitting `--no-default-features` correctly whether the list came from Foundation, the user, both, or neither
+  - Status: Done
+- [x] Update `print_usage()` with the new flag/example
+  - Status: Done
+- [x] Unit tests: flag parsing (comma-separated, whitespace-trimmed), additive combination with dev-tools/editor, additive-alone under shipping
+  - Status: Done
+- [x] (Root repo, out of this crate but same session) Add `scripts\profile.cmd`: `tools run tracy` then `run --features profiling`, forwarding any extra args
+  - Status: Done
+- [x] (Root repo) Update `docs/performance-profiling.md` to lead with `scripts\profile.cmd` and use `foundation-build tools install/run tracy` instead of manual-download instructions
+  - Status: Done
+- [x] Manual end-to-end validation: real `scripts\profile.cmd` run from the Last Beacon repo root
+  - Status: Done — launched Tracy, then built the game with `dev-tools,editor,profiling` under the `test` (release + thin-LTO) configuration (a genuinely long link step, ~10+ minutes, not a hang -- confirmed via `rustc.exe`'s active memory usage while it ran) and launched it. User confirmed "that worked perfectly."
+
+### Validation
+- Format: Pass (`cargo fmt --all`)
+- Lint: Pass (`engine\scripts\lint-project.cmd`, `-D warnings`)
+- Tests: Pass (`engine\scripts\test-project.cmd`: `foundation-build` grew from 19 to 22 tests with the 4 new `--features`-related tests, 0 failed workspace-wide)
+- Build: Pass (`engine\scripts\compile-project.cmd`)
+- Documentation generation: Pass (`engine\scripts\doc-project.cmd`) — same pre-existing unrelated `perf_overlay.rs` warning as earlier phases
+- Full validation wrapper: Pass (covered by the individual steps above)
+- User confirmation: Done — real end-to-end `scripts\profile.cmd` run confirmed working by the user
+
+### Notes
+- `foundation-game.cmd` always appends `--project <path>` to whatever it forwards, including to `tools run tracy` -- since `tools` command parsing only consumes the tokens it needs (`run`, then a tool name) and never validates that the iterator is exhausted afterward, the stray `--project ...` tokens are silently ignored rather than erroring. Harmless in practice (confirmed by the real end-to-end run), but a latent gap worth tightening later if it ever causes confusion (e.g. a genuine typo in `tools` arguments going unnoticed).
+
 ## Postponed Work
 - macOS support: deferred — nothing else in this codebase targets macOS yet, and Tracy's macOS release is structurally different (a `.app` bundle tree vs. a flat executable), which would add real complexity for a platform not otherwise supported.
 - `--version` override for `tools install`: deferred (YAGNI) until a second concrete need for a non-pinned version appears.
-- Follow-up (separate, small, out of this tracker): update Last Beacon's root `docs/performance-profiling.md` to reference `foundation-build tools install tracy` once this ships, replacing the manual-download instructions.
 - Real Linux end-to-end validation (see Implementation / Review Handoff Notes) — not performed, this session only had a Windows machine available.
+- Tightening `tools` argument parsing to reject unexpected trailing arguments (see Phase 5 notes) instead of silently ignoring them — deferred, not causing a real problem today.
 
 ## Progress Log
 - `2026-09-09`: Brainstormed with user following the performance-diagnostics work. Ruled out git submodules (release binaries aren't part of a repo's git history) and package-manager wrapping (version drift, uneven Linux coverage) in favor of a direct-from-GitHub-releases download. Verified real Tracy v0.14.1 release asset layout and computed real SHA-256 digests for the Windows/Linux assets via `gh api`/`curl`/`sha256sum`. User confirmed engine-only scope (matches existing Windows+Linux-only platform support; macOS's `.app` bundle structure would add real complexity for no current benefit) and asked to keep this work on the existing `feature/performance-diagnostics` branch rather than opening a new one.
 - `2026-09-09`: Plan and tracker created under `engine/docs/plans/tool-downloads/`.
 - `2026-09-09`: Implemented all 3 phases. Hit and fixed a real TLS trust issue (switched to `RootCerts::PlatformVerifier`). Ran full validation (format/lint/test/compile/doc) — all pass. Manually validated a real `tools install tracy` run end to end on this machine, including launching the installed binary.
 - `2026-09-09`: Added Phase 4, `tools run <name>` — installs if needed then launches detached. Ran full validation again (all pass, 19 `foundation-build` tests) and manually confirmed a real `tools run tracy` invocation from the Last Beacon repo root (not the engine checkout) launches and returns immediately.
+- `2026-09-09`: Added Phase 5, generic `--features` passthrough plus root `scripts\profile.cmd` and the `docs/performance-profiling.md` follow-up (now done, not just planned). Ran full validation again (all pass, 22 `foundation-build` tests). Manually validated a real `scripts\profile.cmd` run end to end — Tracy launched, the game built under the `test`/release+thin-LTO configuration with profiling enabled (a long, silent link step, not a hang) and launched successfully; user confirmed it worked perfectly.
