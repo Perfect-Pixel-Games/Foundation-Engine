@@ -14,13 +14,24 @@ use std::{
 
 use serde::Deserialize;
 
+mod tool_downloads;
+
 const GAME_MANIFEST_FILE_NAME: &str = "foundation.game.toml";
 const GAMES_DIRECTORY_NAME: &str = "games";
 const DEFAULT_OUTPUT_DIRECTORY: &str = "artifacts/packages";
 
 /// Runs the Foundation build command using already-split command-line arguments.
 pub fn run(arguments: impl IntoIterator<Item = String>) -> Result<(), String> {
-    let invocation = BuildInvocation::parse(arguments)?;
+    let mut argument_iterator = arguments.into_iter().peekable();
+
+    // `tools` has nothing to do with any specific game, so it's dispatched
+    // before the game-project resolution every other command needs.
+    if argument_iterator.peek().map(String::as_str) == Some("tools") {
+        argument_iterator.next();
+        return tool_downloads::run_tools_command(argument_iterator);
+    }
+
+    let invocation = BuildInvocation::parse(argument_iterator)?;
     if invocation.help_requested {
         print_usage();
         return Ok(());
@@ -51,12 +62,16 @@ fn print_usage() {
     println!("  cargo run -p foundation-build -- package (--game <name>|--project <path>) [--platform <alias>] [--configuration <debug|test|shipping>] [--target <game|game-editor>] [--output <directory>]");
     println!("  cargo run -p foundation-build -- build   (--game <name>|--project <path>) [--platform <alias>] [--configuration <debug|test|shipping>] [--target <game|game-editor>]");
     println!("  cargo run -p foundation-build -- run     (--game <name>|--project <path>) [--platform <alias>] [--configuration <debug|test|shipping>] [--target <game|game-editor>] [-- <game arguments>]");
+    println!("  cargo run -p foundation-build -- tools install <tool-name>");
+    println!("  cargo run -p foundation-build -- tools list");
     println!("Examples:");
     println!("  cargo run -p foundation-build -- run --game template-game");
     println!("  cargo run -p foundation-build -- run --project ../template-game/game");
     println!("  cargo run -p foundation-build -- run --project ../template-game/game --platform windows-x64 --configuration debug --target game-editor");
     println!("  cargo run -p foundation-build -- package --project ../template-game/game --platform windows-x64 --configuration test --target game");
     println!("  cargo run -p foundation-build -- package --project ../template-game/game --platform linux-x64 --configuration shipping --target game");
+    println!("  cargo run -p foundation-build -- tools install tracy");
+    println!("  cargo run -p foundation-build -- tools list");
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

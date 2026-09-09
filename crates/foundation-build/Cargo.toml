@@ -8,4 +8,7 @@ description = "Foundation game build and packaging tool"
 
 [dependencies]
 serde.workspace = true
+sha2.workspace = true
 toml.workspace = true
+ureq.workspace = true
+zip.workspace = true
