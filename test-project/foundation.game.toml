@@ -1,0 +1,9 @@
+[game]
+name = "test-project"
+
+[launch]
+package = "test-project"
+
+[package]
+executable-name = "test-project"
+asset-roots = ["assets"]

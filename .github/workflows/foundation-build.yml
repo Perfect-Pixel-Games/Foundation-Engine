@@ -20,8 +20,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  FOUNDATION_GAME: template-game
-  FOUNDATION_GAME_PROJECT: external\template-game\game
+  FOUNDATION_GAME: test-project
+  FOUNDATION_GAME_PROJECT: test-project
   CARGO_TARGET_DIR: C:\actions-runner\cargo-target\Foundation
 
 jobs:
@@ -91,19 +91,6 @@ jobs:
       - name: Install selected Rust target
         shell: cmd
         run: rustup target add x86_64-pc-windows-msvc
-
-      - name: Check out TemplateGame reference project
-        uses: actions/checkout@v4
-        with:
-          repository: Perfect-Pixel-Games/template-game
-          ref: dev
-          path: external/template-game
-
-      - name: Use current Foundation checkout as TemplateGame engine
-        shell: cmd
-        run: |
-          if exist external\template-game\engine rmdir /S /Q external\template-game\engine
-          mklink /J external\template-game\engine "%GITHUB_WORKSPACE%"
 
       - name: Package Foundation game
         shell: cmd
