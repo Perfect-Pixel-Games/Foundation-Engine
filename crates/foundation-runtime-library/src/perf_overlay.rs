@@ -20,6 +20,13 @@
 //! average recomputed once every real-time second (a tumbling 1-second
 //! window, not Bevy's own frame-count-based `Diagnostic::average()`, so it
 //! stays meaningful regardless of frame rate).
+//!
+//! Below the grid, a frame-time history strip renders the last
+//! [`FRAME_TIME_HISTORY_SAMPLE_COUNT`] raw (unsmoothed) per-frame samples as
+//! bars, so short stutters/spikes stay visible even when the 1-second
+//! average looks fine. The `stat.perf.dump` console command writes a
+//! one-shot snapshot of the grid's stats to the log, independent of the
+//! overlay's visibility, for capturing perf evidence without a screenshot.
 
 use bevy::{
     diagnostic::{
@@ -33,6 +40,7 @@ use bevy::{
     time::Real,
     ui::{GridAutoFlow, RepeatedGridTrack},
 };
+use std::collections::VecDeque;
 
 /// Toggled by the `stat.perf` console command to show/hide the performance overlay.
 #[derive(Clone, Copy, Debug, Default, Resource, Reflect)]
@@ -178,6 +186,41 @@ impl Default for FoundationPerfOverlayRunningAverages {
 
 const PERF_OVERLAY_AVERAGE_WINDOW_SECS: f32 = 1.0;
 
+/// Number of frame-time bars shown in the history strip. A frame count
+/// rather than a fixed time window, so it stays a small, fixed number of UI
+/// entities regardless of frame rate (unlike the running-average window
+/// above, this graph is about spotting individual spikes, not summarizing a
+/// span of wall-clock time).
+const FRAME_TIME_HISTORY_SAMPLE_COUNT: usize = 120;
+
+/// Frame time (ms) that maps to the tallest bar; anything slower is clamped
+/// to full height rather than growing the graph unboundedly. 50ms is 20fps,
+/// comfortably below the 40fps this overlay was built to help diagnose, so a
+/// genuinely bad frame still reads as "near the top" rather than "off the
+/// chart".
+const FRAME_TIME_HISTORY_BAR_CEILING_MS: f32 = 50.0;
+
+/// Pixel height of the tallest possible bar in the history strip.
+const FRAME_TIME_HISTORY_BAR_MAX_HEIGHT_PX: f32 = 40.0;
+
+/// Ring buffer of the most recent raw (unsmoothed) per-frame frame-time
+/// samples, oldest first. Deliberately reads `Diagnostic::value()` rather
+/// than the `smoothed()` value the "Now" column uses elsewhere in this file
+/// -- smoothing is exactly what would hide the short stutters this graph
+/// exists to surface.
+#[derive(Resource, Default)]
+struct FoundationPerfOverlayFrameTimeHistory {
+    samples: VecDeque<f32>,
+}
+
+/// Converts a raw frame-time sample into the bar height that represents it,
+/// clamped at [`FRAME_TIME_HISTORY_BAR_CEILING_MS`].
+fn frame_time_history_bar_height_px(frame_time_ms: f32) -> f32 {
+    let clamped_frame_time_ms = frame_time_ms.min(FRAME_TIME_HISTORY_BAR_CEILING_MS);
+    (clamped_frame_time_ms / FRAME_TIME_HISTORY_BAR_CEILING_MS)
+        * FRAME_TIME_HISTORY_BAR_MAX_HEIGHT_PX
+}
+
 /// Plugin that installs Foundation's performance-stat overlay and its
 /// backing diagnostics plugins.
 ///
@@ -213,13 +256,17 @@ impl Plugin for FoundationPerfOverlayPlugin {
         .register_type::<FoundationPerfOverlayState>()
         .init_resource::<FoundationPerfOverlayState>()
         .init_resource::<FoundationPerfOverlayRunningAverages>()
+        .init_resource::<FoundationPerfOverlayFrameTimeHistory>()
+        .init_resource::<FoundationPerfOverlayHistoryBarEntities>()
         .add_systems(Startup, spawn_perf_overlay)
         .add_systems(
             Update,
             (
                 accumulate_perf_overlay_running_averages,
+                record_perf_overlay_frame_time_history,
                 sync_perf_overlay_visibility,
                 refresh_perf_overlay_text,
+                refresh_perf_overlay_frame_time_graph,
             ),
         );
     }
@@ -246,13 +293,29 @@ fn record_cpu_process_frame_time(
 #[derive(Clone, Copy, Debug, Component)]
 struct FoundationPerfOverlayRoot;
 
+/// Marks one bar entity in the frame-time history strip.
+#[derive(Clone, Copy, Debug, Component)]
+struct FoundationPerfOverlayHistoryBar;
+
+/// The history strip's bar entities in left-to-right (oldest-to-newest slot)
+/// spawn order, so [`refresh_perf_overlay_frame_time_graph`] can walk them
+/// alongside [`FoundationPerfOverlayFrameTimeHistory`]'s samples without a
+/// query-ordering dependency.
+#[derive(Resource, Default)]
+struct FoundationPerfOverlayHistoryBarEntities {
+    bars_oldest_to_newest: Vec<Entity>,
+}
+
 /// Spawns the overlay as a grid panel inside a full-screen, invisible
 /// wrapper rather than positioning the panel itself absolutely: pinning to
 /// the right edge while centering vertically needs the wrapper's flexbox
 /// alignment (`align_items: End` for the cross axis, `justify_content:
 /// Center` for the main axis) since Bevy UI has no percentage-based
 /// self-centering transform for an absolutely-positioned, auto-sized node.
-fn spawn_perf_overlay(mut commands: Commands) {
+fn spawn_perf_overlay(
+    mut commands: Commands,
+    mut history_bar_entities: ResMut<FoundationPerfOverlayHistoryBarEntities>,
+) {
     let panel_background = BackgroundColor(Color::srgba(0.02, 0.02, 0.025, 0.85));
     let panel_border = BorderColor::all(Color::srgba(0.25, 0.25, 0.30, 1.0));
     let header_text_color = TextColor(Color::srgba(0.6, 0.65, 0.6, 1.0));
@@ -329,6 +392,51 @@ fn spawn_perf_overlay(mut commands: Commands) {
         for cell in [name_cell, value_cell, average_cell] {
             commands.entity(panel_entity).add_child(cell);
         }
+    }
+
+    let history_panel_entity = commands
+        .spawn((
+            Name::new("Foundation Perf Overlay Frame Time History"),
+            Node {
+                display: Display::Flex,
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::FlexEnd,
+                column_gap: Val::Px(1.0),
+                height: Val::Px(FRAME_TIME_HISTORY_BAR_MAX_HEIGHT_PX + 16.0),
+                padding: UiRect::all(Val::Px(8.0)),
+                margin: UiRect::top(Val::Px(4.0)),
+                border: UiRect::all(Val::Px(1.0)),
+                ..default()
+            },
+            panel_background,
+            panel_border,
+        ))
+        .id();
+    commands
+        .entity(wrapper_entity)
+        .add_child(history_panel_entity);
+
+    let history_bar_color = BackgroundColor(Color::srgba(0.5, 0.85, 0.5, 1.0));
+    for _ in 0..FRAME_TIME_HISTORY_SAMPLE_COUNT {
+        let history_bar_entity = commands
+            .spawn((
+                Node {
+                    width: Val::Px(2.0),
+                    // Bars start at zero height and are filled in as samples
+                    // arrive -- see refresh_perf_overlay_frame_time_graph.
+                    height: Val::Px(0.0),
+                    ..default()
+                },
+                history_bar_color,
+                FoundationPerfOverlayHistoryBar,
+            ))
+            .id();
+        commands
+            .entity(history_panel_entity)
+            .add_child(history_bar_entity);
+        history_bar_entities
+            .bars_oldest_to_newest
+            .push(history_bar_entity);
     }
 }
 
@@ -424,6 +532,27 @@ fn accumulate_perf_overlay_running_averages(
     }
 }
 
+/// Appends this frame's raw frame-time sample to the history ring buffer,
+/// dropping the oldest sample once the buffer is full. Runs regardless of
+/// overlay visibility for the same reason as the running averages above --
+/// the graph should already be full of real data the moment it's toggled on.
+fn record_perf_overlay_frame_time_history(
+    mut history: ResMut<FoundationPerfOverlayFrameTimeHistory>,
+    diagnostics: Res<DiagnosticsStore>,
+) {
+    let Some(latest_frame_time_ms) = diagnostics
+        .get(&FrameTimeDiagnosticsPlugin::FRAME_TIME)
+        .and_then(Diagnostic::value)
+    else {
+        return;
+    };
+
+    history.samples.push_back(latest_frame_time_ms as f32);
+    if history.samples.len() > FRAME_TIME_HISTORY_SAMPLE_COUNT {
+        history.samples.pop_front();
+    }
+}
+
 /// Refreshes the overlay's data cells from `DiagnosticsStore` and the
 /// running-average resource. Skips all work when the overlay is hidden, and
 /// only writes a cell's `Text` when its rendered content actually changed
@@ -450,6 +579,49 @@ fn refresh_perf_overlay_text(
         let rendered = line.format(value);
         if text.0 != rendered {
             text.0 = rendered;
+        }
+    }
+}
+
+/// Refreshes the frame-time history strip's bar heights from the ring
+/// buffer. Skips all work when the overlay is hidden (same reasoning as
+/// `refresh_perf_overlay_text`), and only writes a bar's `Node::height` when
+/// it actually changed to avoid marking every bar "changed" every frame.
+///
+/// Bars are laid out oldest-to-newest left-to-right, matching
+/// [`FoundationPerfOverlayHistoryBarEntities`]'s spawn order; while the
+/// buffer hasn't filled up yet (e.g. just after startup), the oldest bar
+/// slots that don't have a sample yet are shown at zero height.
+fn refresh_perf_overlay_frame_time_graph(
+    state: Res<FoundationPerfOverlayState>,
+    history: Res<FoundationPerfOverlayFrameTimeHistory>,
+    history_bar_entities: Res<FoundationPerfOverlayHistoryBarEntities>,
+    mut bars: Query<&mut Node, With<FoundationPerfOverlayHistoryBar>>,
+) {
+    if !state.visible {
+        return;
+    }
+
+    let bar_slot_count = history_bar_entities.bars_oldest_to_newest.len();
+    let filled_sample_count = history.samples.len();
+    let empty_slot_count = bar_slot_count.saturating_sub(filled_sample_count);
+
+    for (bar_slot_index, &bar_entity) in history_bar_entities
+        .bars_oldest_to_newest
+        .iter()
+        .enumerate()
+    {
+        let Ok(mut bar_node) = bars.get_mut(bar_entity) else {
+            continue;
+        };
+        let target_height_px = if bar_slot_index < empty_slot_count {
+            0.0
+        } else {
+            let sample_index = bar_slot_index - empty_slot_count;
+            frame_time_history_bar_height_px(history.samples[sample_index])
+        };
+        if bar_node.height != Val::Px(target_height_px) {
+            bar_node.height = Val::Px(target_height_px);
         }
     }
 }
@@ -528,6 +700,28 @@ fn sum_render_pass_diagnostics(diagnostics: &DiagnosticsStore) -> (f64, usize, f
 #[crate::console_command(name = "stat.perf")]
 pub fn stat_perf(mut state: ResMut<FoundationPerfOverlayState>) {
     state.visible = !state.visible;
+}
+
+/// Writes a one-shot snapshot of every performance stat's current and
+/// 1-second-average value to the log, whether or not the overlay is
+/// currently visible -- useful for capturing perf evidence (for example, in
+/// a bug report) without needing a screenshot.
+#[crate::console_command(name = "stat.perf.dump")]
+fn stat_perf_dump(
+    diagnostics: Res<DiagnosticsStore>,
+    averages: Res<FoundationPerfOverlayRunningAverages>,
+) {
+    info!("Foundation perf snapshot:");
+    for line in FoundationPerfOverlayLine::ALL {
+        let now_value = current_value(line, &diagnostics);
+        let average_value = averages.last_averages[line.index()];
+        info!(
+            "  {}: now={} avg1s={}",
+            line.label(),
+            line.format(now_value),
+            line.format(average_value)
+        );
+    }
 }
 
 #[cfg(test)]
@@ -761,6 +955,146 @@ mod tests {
                 .resource::<FoundationPerfOverlayRunningAverages>()
                 .last_averages[FoundationPerfOverlayLine::Fps.index()],
             Some(60.0)
+        );
+    }
+
+    #[test]
+    fn frame_time_history_bar_height_clamps_at_the_ceiling() {
+        let far_above_ceiling_ms = FRAME_TIME_HISTORY_BAR_CEILING_MS * 2.0;
+        assert_eq!(
+            frame_time_history_bar_height_px(far_above_ceiling_ms),
+            FRAME_TIME_HISTORY_BAR_MAX_HEIGHT_PX
+        );
+    }
+
+    #[test]
+    fn frame_time_history_bar_height_scales_linearly_below_the_ceiling() {
+        let half_ceiling_frame_time_ms = FRAME_TIME_HISTORY_BAR_CEILING_MS / 2.0;
+        let expected_half_height_px = FRAME_TIME_HISTORY_BAR_MAX_HEIGHT_PX / 2.0;
+        let actual_height_px = frame_time_history_bar_height_px(half_ceiling_frame_time_ms);
+        assert!((actual_height_px - expected_half_height_px).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn record_frame_time_history_appends_samples_and_caps_at_the_sample_count() {
+        let mut app = App::new();
+        app.init_resource::<DiagnosticsStore>();
+        app.init_resource::<FoundationPerfOverlayFrameTimeHistory>();
+        app.world_mut()
+            .resource_mut::<DiagnosticsStore>()
+            .add(diagnostic_with_value("frame_time", 0.0));
+        app.add_systems(Update, record_perf_overlay_frame_time_history);
+
+        let recorded_sample_count = FRAME_TIME_HISTORY_SAMPLE_COUNT + 5;
+        for sample_index in 0..recorded_sample_count {
+            let frame_time_ms = sample_index as f64;
+            app.world_mut()
+                .resource_mut::<DiagnosticsStore>()
+                .get_mut(&FrameTimeDiagnosticsPlugin::FRAME_TIME)
+                .unwrap()
+                .add_measurement(bevy::diagnostic::DiagnosticMeasurement {
+                    time: Instant::now(),
+                    value: frame_time_ms,
+                });
+            app.update();
+        }
+
+        let history = app
+            .world()
+            .resource::<FoundationPerfOverlayFrameTimeHistory>();
+        assert_eq!(history.samples.len(), FRAME_TIME_HISTORY_SAMPLE_COUNT);
+
+        let oldest_surviving_sample_index = recorded_sample_count - FRAME_TIME_HISTORY_SAMPLE_COUNT;
+        assert_eq!(
+            history.samples.front().copied(),
+            Some(oldest_surviving_sample_index as f32)
+        );
+        assert_eq!(
+            history.samples.back().copied(),
+            Some((recorded_sample_count - 1) as f32)
+        );
+    }
+
+    #[test]
+    fn refresh_frame_time_graph_sets_bar_height_from_history_when_visible() {
+        let mut app = App::new();
+        app.insert_resource(FoundationPerfOverlayState { visible: true });
+        let mut history = FoundationPerfOverlayFrameTimeHistory::default();
+        history
+            .samples
+            .push_back(FRAME_TIME_HISTORY_BAR_CEILING_MS / 2.0);
+        app.insert_resource(history);
+
+        let history_bar_entity = app
+            .world_mut()
+            .spawn((Node::default(), FoundationPerfOverlayHistoryBar))
+            .id();
+        app.insert_resource(FoundationPerfOverlayHistoryBarEntities {
+            bars_oldest_to_newest: vec![history_bar_entity],
+        });
+        app.add_systems(Update, refresh_perf_overlay_frame_time_graph);
+
+        app.update();
+
+        let expected_height_px = FRAME_TIME_HISTORY_BAR_MAX_HEIGHT_PX / 2.0;
+        assert_eq!(
+            app.world().get::<Node>(history_bar_entity).unwrap().height,
+            Val::Px(expected_height_px)
+        );
+    }
+
+    #[test]
+    fn refresh_frame_time_graph_leaves_unfilled_slots_at_zero_height() {
+        let mut app = App::new();
+        app.insert_resource(FoundationPerfOverlayState { visible: true });
+        app.insert_resource(FoundationPerfOverlayFrameTimeHistory::default());
+
+        let history_bar_entity = app
+            .world_mut()
+            .spawn((Node::default(), FoundationPerfOverlayHistoryBar))
+            .id();
+        app.insert_resource(FoundationPerfOverlayHistoryBarEntities {
+            bars_oldest_to_newest: vec![history_bar_entity],
+        });
+        app.add_systems(Update, refresh_perf_overlay_frame_time_graph);
+
+        app.update();
+
+        assert_eq!(
+            app.world().get::<Node>(history_bar_entity).unwrap().height,
+            Val::Px(0.0)
+        );
+    }
+
+    #[test]
+    fn refresh_frame_time_graph_skips_work_when_overlay_hidden() {
+        let mut app = App::new();
+        app.insert_resource(FoundationPerfOverlayState { visible: false });
+        let mut history = FoundationPerfOverlayFrameTimeHistory::default();
+        history.samples.push_back(FRAME_TIME_HISTORY_BAR_CEILING_MS);
+        app.insert_resource(history);
+
+        let unrelated_existing_height_px = 999.0;
+        let history_bar_entity = app
+            .world_mut()
+            .spawn((
+                Node {
+                    height: Val::Px(unrelated_existing_height_px),
+                    ..default()
+                },
+                FoundationPerfOverlayHistoryBar,
+            ))
+            .id();
+        app.insert_resource(FoundationPerfOverlayHistoryBarEntities {
+            bars_oldest_to_newest: vec![history_bar_entity],
+        });
+        app.add_systems(Update, refresh_perf_overlay_frame_time_graph);
+
+        app.update();
+
+        assert_eq!(
+            app.world().get::<Node>(history_bar_entity).unwrap().height,
+            Val::Px(unrelated_existing_height_px)
         );
     }
 }
