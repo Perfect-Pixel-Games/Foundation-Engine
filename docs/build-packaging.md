@@ -17,6 +17,16 @@ scripts\foundation-build.cmd package --project ..\template-game\game --platform 
 
 `--project` accepts either a directory containing `foundation.game.toml` or a direct path to a `foundation.game.toml` file. Relative paths resolve from the caller's current directory, so game repositories can call the engine script from their own wrapper scripts.
 
+## Internal Test Fixture
+
+`engine/test-project/` is a minimal Foundation game project that lives inside the engine repository itself, built the same way as an external project:
+
+```cmd
+scripts\foundation-build.cmd package --project test-project --platform windows-x64 --configuration test --target game
+```
+
+It exists only so engine CI and local validation can exercise a full build/package/asset-loading flow without checking out or depending on the external `template-game` repository's branch state. It is not a reference game; keep it deliberately small and do not add real game content to it. Real games and reference games should keep using their own repository with `--project <path>` as shown above.
+
 ## Build Configurations
 
 | Configuration | Meaning | Dev tools | Editor target | Typical use |
@@ -144,6 +154,6 @@ GitHub workflows call the same local command as developers. Self-hosted runners 
 - platform linkers and SDKs required by the selected targets,
 - `tar` available for archive creation.
 
-The Foundation workflow validates the engine workspace and packages the external TemplateGame reference project on pushes and pull requests for `dev` and `main`. Foundation no longer publishes GitHub Releases because game packages belong to game repositories. It still creates version tags on protected branch pushes after validation and packaging pass. Package artifacts remain available from workflow runs as integration evidence.
+The Foundation workflow validates the engine workspace and packages the internal `test-project` fixture (`engine/test-project/`, see `docs/plans/internal-test-project/plan.md`) on pushes and pull requests for `dev` and `main`. Building against an in-repo fixture instead of checking out the external `template-game` repository means engine CI never depends on another repository's branch state. Foundation no longer publishes GitHub Releases because game packages belong to game repositories. It still creates version tags on protected branch pushes after validation and packaging pass. Package artifacts remain available from workflow runs as integration evidence.
 
 Linux runner jobs are currently disabled because no Linux self-hosted runner is available. The workflow can be expanded back to a Windows/Linux matrix when a Linux runner is online.

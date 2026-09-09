@@ -1,0 +1,53 @@
+[package]
+name = "test-project"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Internal Foundation engine fixture used by CI and local validation instead of the external template-game repository."
+
+[lib]
+crate-type = ["rlib"]
+
+[features]
+default = ["dev-tools", "editor"]
+dev-tools = ["dep:linkme", "foundation-runtime-library/dev-tools"]
+editor = ["dep:foundation-editor-library"]
+
+[dependencies]
+bevy = { version = "0.19.0", features = [
+    "file_watcher",
+    "reflect_documentation",
+    "serialize",
+] }
+foundation-editor-library = { path = "../crates/foundation-editor-library", optional = true }
+foundation-runtime-library = { path = "../crates/foundation-runtime-library", default-features = false }
+linkme = { version = "0.3", optional = true }
+
+# Kept out of the engine workspace on purpose (see
+# docs/plans/internal-test-project/plan.md), so this manifest cannot inherit
+# workspace profiles/dependencies and spells them out directly instead.
+[workspace]
+
+[profile.dev]
+opt-level = 0
+
+[profile.dev.package."*"]
+opt-level = 0
+
+# Duplicated from engine/Cargo.toml because this project is not a workspace
+# member. Keep these in sync by hand if the engine's profiles change.
+[profile.foundation-test]
+inherits = "release"
+debug = "line-tables-only"
+strip = "none"
+lto = "thin"
+
+[profile.foundation-shipping]
+inherits = "dev"
+opt-level = 3
+debug = false
+strip = "symbols"
+lto = "off"
+codegen-units = 16
+panic = "abort"
