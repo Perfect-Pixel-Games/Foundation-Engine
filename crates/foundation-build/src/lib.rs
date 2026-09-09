@@ -14,13 +14,24 @@ use std::{
 
 use serde::Deserialize;
 
+mod tool_downloads;
+
 const GAME_MANIFEST_FILE_NAME: &str = "foundation.game.toml";
 const GAMES_DIRECTORY_NAME: &str = "games";
 const DEFAULT_OUTPUT_DIRECTORY: &str = "artifacts/packages";
 
 /// Runs the Foundation build command using already-split command-line arguments.
 pub fn run(arguments: impl IntoIterator<Item = String>) -> Result<(), String> {
-    let invocation = BuildInvocation::parse(arguments)?;
+    let mut argument_iterator = arguments.into_iter().peekable();
+
+    // `tools` has nothing to do with any specific game, so it's dispatched
+    // before the game-project resolution every other command needs.
+    if argument_iterator.peek().map(String::as_str) == Some("tools") {
+        argument_iterator.next();
+        return tool_downloads::run_tools_command(argument_iterator);
+    }
+
+    let invocation = BuildInvocation::parse(argument_iterator)?;
     if invocation.help_requested {
         print_usage();
         return Ok(());
@@ -48,15 +59,22 @@ pub fn run(arguments: impl IntoIterator<Item = String>) -> Result<(), String> {
 fn print_usage() {
     println!("Foundation build tool");
     println!("Usage:");
-    println!("  cargo run -p foundation-build -- package (--game <name>|--project <path>) [--platform <alias>] [--configuration <debug|test|shipping>] [--target <game|game-editor>] [--output <directory>]");
-    println!("  cargo run -p foundation-build -- build   (--game <name>|--project <path>) [--platform <alias>] [--configuration <debug|test|shipping>] [--target <game|game-editor>]");
-    println!("  cargo run -p foundation-build -- run     (--game <name>|--project <path>) [--platform <alias>] [--configuration <debug|test|shipping>] [--target <game|game-editor>] [-- <game arguments>]");
+    println!("  cargo run -p foundation-build -- package (--game <name>|--project <path>) [--platform <alias>] [--configuration <debug|test|shipping>] [--target <game|game-editor>] [--output <directory>] [--features <name1,name2>]");
+    println!("  cargo run -p foundation-build -- build   (--game <name>|--project <path>) [--platform <alias>] [--configuration <debug|test|shipping>] [--target <game|game-editor>] [--features <name1,name2>]");
+    println!("  cargo run -p foundation-build -- run     (--game <name>|--project <path>) [--platform <alias>] [--configuration <debug|test|shipping>] [--target <game|game-editor>] [--features <name1,name2>] [-- <game arguments>]");
+    println!("  cargo run -p foundation-build -- tools install <tool-name>");
+    println!("  cargo run -p foundation-build -- tools list");
+    println!("  cargo run -p foundation-build -- tools run <tool-name>");
     println!("Examples:");
     println!("  cargo run -p foundation-build -- run --game template-game");
     println!("  cargo run -p foundation-build -- run --project ../template-game/game");
     println!("  cargo run -p foundation-build -- run --project ../template-game/game --platform windows-x64 --configuration debug --target game-editor");
     println!("  cargo run -p foundation-build -- package --project ../template-game/game --platform windows-x64 --configuration test --target game");
     println!("  cargo run -p foundation-build -- package --project ../template-game/game --platform linux-x64 --configuration shipping --target game");
+    println!("  cargo run -p foundation-build -- run --project ../template-game/game --features profiling");
+    println!("  cargo run -p foundation-build -- tools install tracy");
+    println!("  cargo run -p foundation-build -- tools list");
+    println!("  cargo run -p foundation-build -- tools run tracy");
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -212,6 +230,7 @@ struct BuildInvocation {
     configuration: Option<BuildConfiguration>,
     target_kind: Option<TargetKind>,
     output_directory: Option<PathBuf>,
+    extra_feature_names: Vec<String>,
     runtime_arguments: Vec<String>,
     help_requested: bool,
 }
@@ -265,6 +284,16 @@ impl BuildInvocation {
                 "--output" => {
                     let output_directory_text = required_value("--output", &mut argument_iterator)?;
                     invocation.output_directory = Some(PathBuf::from(output_directory_text));
+                }
+                "--features" => {
+                    let extra_feature_names_text =
+                        required_value("--features", &mut argument_iterator)?;
+                    invocation.extra_feature_names = extra_feature_names_text
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|feature_name| !feature_name.is_empty())
+                        .map(str::to_string)
+                        .collect();
                 }
                 "--help" | "-h" => {
                     invocation.help_requested = true;
@@ -323,6 +352,7 @@ struct BuildRequest {
     configuration: BuildConfiguration,
     target_kind: TargetKind,
     output_directory: PathBuf,
+    extra_feature_names: Vec<String>,
     runtime_arguments: Vec<String>,
     uses_workspace_package: bool,
 }
@@ -383,19 +413,25 @@ impl BuildRequest {
             configuration,
             target_kind,
             output_directory,
+            extra_feature_names: invocation.extra_feature_names,
             runtime_arguments: invocation.runtime_arguments,
             uses_workspace_package: game_project.uses_workspace_package,
         })
     }
 
     fn cargo_feature_arguments(&self) -> Vec<String> {
-        let mut feature_names = Vec::new();
+        let mut feature_names: Vec<&str> = Vec::new();
         if self.configuration.enables_dev_tools() {
             feature_names.push("dev-tools");
         }
         if self.target_kind == TargetKind::GameEditor {
             feature_names.push("editor");
         }
+        // Additive on top of Foundation's own dev-tools/editor selection --
+        // lets a game enable its own arbitrary Cargo features (e.g. a
+        // Tracy-profiling feature) at build time without Foundation needing
+        // to know that feature's name.
+        feature_names.extend(self.extra_feature_names.iter().map(String::as_str));
 
         if feature_names.is_empty() {
             vec!["--no-default-features".to_string()]
@@ -914,6 +950,7 @@ mod tests {
             configuration: Some(BuildConfiguration::Shipping),
             target_kind: Some(TargetKind::GameEditor),
             output_directory: None,
+            extra_feature_names: Vec::new(),
             runtime_arguments: Vec::new(),
             help_requested: false,
         };
@@ -937,6 +974,7 @@ mod tests {
             configuration: Some(BuildConfiguration::Test),
             target_kind: Some(TargetKind::GameEditor),
             output_directory: None,
+            extra_feature_names: Vec::new(),
             runtime_arguments: Vec::new(),
             help_requested: false,
         };
@@ -961,6 +999,7 @@ mod tests {
             configuration: Some(BuildConfiguration::Shipping),
             target_kind: Some(TargetKind::Game),
             output_directory: None,
+            extra_feature_names: Vec::new(),
             runtime_arguments: Vec::new(),
             help_requested: false,
         };
@@ -976,6 +1015,77 @@ mod tests {
     }
 
     #[test]
+    fn extra_features_flag_is_parsed_into_a_comma_separated_list() {
+        let invocation = BuildInvocation::parse([
+            "run".to_string(),
+            "--game".to_string(),
+            "template-game".to_string(),
+            "--features".to_string(),
+            "profiling, extra-thing".to_string(),
+        ])
+        .expect("invocation should parse");
+
+        assert_eq!(
+            invocation.extra_feature_names,
+            vec!["profiling".to_string(), "extra-thing".to_string()]
+        );
+    }
+
+    #[test]
+    fn extra_features_are_additive_alongside_foundations_own_features() {
+        let invocation = BuildInvocation {
+            command: Some(BuildCommand::Package),
+            game_name: "template-game".to_string(),
+            project_path: None,
+            platform_text: "linux-x64".to_string(),
+            configuration: Some(BuildConfiguration::Test),
+            target_kind: Some(TargetKind::GameEditor),
+            output_directory: None,
+            extra_feature_names: vec!["profiling".to_string()],
+            runtime_arguments: Vec::new(),
+            help_requested: false,
+        };
+        let game_project = template_game_project();
+        let invocation_directory = PathBuf::from("C:/workspace/Foundation");
+        let build_request = BuildRequest::new(invocation, invocation_directory, game_project)
+            .expect("request should build");
+
+        assert_eq!(
+            build_request.cargo_feature_arguments(),
+            [
+                "--no-default-features",
+                "--features",
+                "dev-tools,editor,profiling"
+            ]
+        );
+    }
+
+    #[test]
+    fn extra_features_alone_still_disable_default_features_in_shipping() {
+        let invocation = BuildInvocation {
+            command: Some(BuildCommand::Package),
+            game_name: "template-game".to_string(),
+            project_path: None,
+            platform_text: "windows-x64".to_string(),
+            configuration: Some(BuildConfiguration::Shipping),
+            target_kind: Some(TargetKind::Game),
+            output_directory: None,
+            extra_feature_names: vec!["profiling".to_string()],
+            runtime_arguments: Vec::new(),
+            help_requested: false,
+        };
+        let game_project = template_game_project();
+        let invocation_directory = PathBuf::from("C:/workspace/Foundation");
+        let build_request = BuildRequest::new(invocation, invocation_directory, game_project)
+            .expect("request should build");
+
+        assert_eq!(
+            build_request.cargo_feature_arguments(),
+            ["--no-default-features", "--features", "profiling"]
+        );
+    }
+
+    #[test]
     fn omitted_configuration_and_target_default_to_test_game() {
         let invocation = BuildInvocation {
             command: Some(BuildCommand::Run),
@@ -985,6 +1095,7 @@ mod tests {
             configuration: None,
             target_kind: None,
             output_directory: None,
+            extra_feature_names: Vec::new(),
             runtime_arguments: Vec::new(),
             help_requested: false,
         };
@@ -1072,6 +1183,7 @@ mod tests {
             configuration: Some(BuildConfiguration::Test),
             target_kind: Some(TargetKind::Game),
             output_directory: None,
+            extra_feature_names: Vec::new(),
             runtime_arguments: Vec::new(),
             help_requested: false,
         };
@@ -1103,6 +1215,7 @@ mod tests {
             configuration: Some(BuildConfiguration::Test),
             target_kind: Some(TargetKind::Game),
             output_directory: None,
+            extra_feature_names: Vec::new(),
             runtime_arguments: Vec::new(),
             help_requested: false,
         };
