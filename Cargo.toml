@@ -40,10 +40,10 @@ toml = "0.9"
 windows-sys = "0.61"
 
 [profile.dev]
-opt-level = 0
+opt-level = 1
 
 [profile.dev.package."*"]
-opt-level = 0
+opt-level = 3
 
 [profile.foundation-test]
 inherits = "release"
