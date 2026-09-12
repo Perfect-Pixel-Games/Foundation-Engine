@@ -9,6 +9,7 @@
 extern crate self as foundation_runtime_library;
 
 use bevy::prelude::*;
+use bevy_enhanced_input::prelude::*;
 #[cfg(feature = "dev-tools")]
 pub use foundation_console_macros::{console_command, ConsoleCommandInput};
 
@@ -22,6 +23,7 @@ lalrpop_util::lalrpop_mod!(
     #[allow(clippy::vec_init_then_push)]
     dynamic_bsn_grammar
 );
+pub mod free_fly_camera;
 pub mod game_settings;
 pub mod logging;
 pub mod menu;
@@ -32,6 +34,20 @@ pub mod splash_screen;
 pub mod startup_scene;
 pub mod ui_theme;
 
+/// Adds [`EnhancedInputPlugin`] to `app` unless a previous plugin already did.
+///
+/// Foundation's input-context plugins (menu, splash screen, console, free-fly
+/// camera) each depend on `bevy_enhanced_input` being installed, and each is
+/// also usable on its own in tests that do not add the full
+/// [`FoundationPlugin`]. Bevy panics if the same plugin type is added twice,
+/// so every call site that needs `EnhancedInputPlugin` must go through this
+/// guard instead of calling `app.add_plugins(EnhancedInputPlugin)` directly.
+pub(crate) fn add_enhanced_input_plugin_if_missing(app: &mut App) {
+    if !app.is_plugin_added::<EnhancedInputPlugin>() {
+        app.add_plugins(EnhancedInputPlugin);
+    }
+}
+
 /// Shared baseline plugin for Foundation games.
 ///
 /// Add this plugin to both standalone game binaries and Foundation engine launches. Future reusable components, resources, and systems should be
@@ -41,6 +57,11 @@ pub struct FoundationPlugin;
 
 impl Plugin for FoundationPlugin {
     fn build(&self, app: &mut App) {
+        // Enhanced input must exist before any context-registering sub-plugin
+        // builds, since `add_input_context` reads resources `EnhancedInputPlugin`
+        // inserts in its own `build`.
+        add_enhanced_input_plugin_if_missing(app);
+
         // Register shared gameplay systems before exposing baseline reflected types.
         app.add_plugins((
             scene_stack::FoundationSceneStackPlugin,
@@ -145,6 +166,11 @@ pub mod prelude {
         CreditsDocument, CreditsGroup, FoundationCreditsAssetRoots, FoundationCreditsPlugin,
         FoundationCreditsRoll, FoundationCreditsRuntime, FoundationCreditsRuntimeSettings,
         FoundationGeneratedCreditsUi,
+    };
+    pub use crate::free_fly_camera::{
+        foundation_free_fly_camera_bundle, FoundationFreeFlyCameraInput,
+        FoundationFreeFlyCameraOrientation, FoundationFreeFlyCameraPlugin,
+        FoundationFreeFlyCameraSettings,
     };
     pub use crate::game_settings::{
         FoundationGameSettings, FoundationGameSettingsIoError, FOUNDATION_GAME_SETTINGS_FILE_NAME,

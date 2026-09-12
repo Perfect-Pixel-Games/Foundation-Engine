@@ -10,6 +10,7 @@ use crate::scene_stack::{
     OpenSceneOptions, SceneCommand, SceneOwner, ScenePresentation, SceneSource, SceneStack,
 };
 use bevy::prelude::*;
+use bevy_enhanced_input::prelude::*;
 
 /// Installs reusable Foundation menu components and systems.
 #[derive(Default)]
@@ -17,8 +18,14 @@ pub struct FoundationMenuPlugin;
 
 impl Plugin for FoundationMenuPlugin {
     fn build(&self, app: &mut App) {
+        // Enhanced input must exist before `add_input_context` runs, and this
+        // plugin is also used on its own in tests that skip `FoundationPlugin`.
+        crate::add_enhanced_input_plugin_if_missing(app);
+
         // Runtime resources come first so menu systems can read stable defaults immediately.
-        app.init_resource::<FoundationPauseState>()
+        app.add_input_context::<FoundationMenuInput>()
+            .add_systems(Startup, spawn_foundation_menu_input_context)
+            .init_resource::<FoundationPauseState>()
             .init_resource::<FoundationMenuRuntimeSettings>()
             .add_message::<FoundationExitRequested>()
             .register_type::<FoundationMenuButton>()
@@ -52,6 +59,31 @@ impl Plugin for FoundationMenuPlugin {
                 ),
             );
     }
+}
+
+/// Reusable input context for Foundation's pause/close-on-escape menu behavior.
+///
+/// Spawned once by [`spawn_foundation_menu_input_context`]; games never need to
+/// spawn or configure this themselves.
+#[derive(Component, Default)]
+pub struct FoundationMenuInput;
+
+/// Back/pause action shared by [`open_pause_menus`] and [`close_on_escape`].
+///
+/// Both systems independently read this action's [`ActionEvents`] the same
+/// frame it starts triggering, matching the previous `just_pressed` behavior
+/// of reacting to the same Escape press without either system consuming it.
+#[derive(InputAction)]
+#[action_output(bool)]
+pub struct FoundationMenuBack;
+
+fn spawn_foundation_menu_input_context(mut commands: Commands) {
+    commands.spawn((
+        FoundationMenuInput,
+        actions!(FoundationMenuInput[
+            (Action::<FoundationMenuBack>::new(), bindings![KeyCode::Escape]),
+        ]),
+    ));
 }
 
 /// Global pause state for Foundation scene-stack gameplay.
@@ -765,7 +797,7 @@ type FoundationMenuButtonInteractionQuery<'w, 's> = Query<
 >;
 
 fn open_pause_menus(
-    keyboard: Res<ButtonInput<KeyCode>>,
+    menu_back_action: Single<&ActionEvents, With<Action<FoundationMenuBack>>>,
     settings: Res<FoundationMenuRuntimeSettings>,
     scene_stack: Option<Res<SceneStack>>,
     mut pause_state: ResMut<FoundationPauseState>,
@@ -777,7 +809,7 @@ fn open_pause_menus(
     scene_owners: Query<&SceneOwner>,
     mut scene_commands: MessageWriter<SceneCommand>,
 ) {
-    if pause_state.paused || !keyboard.just_pressed(KeyCode::Escape) {
+    if pause_state.paused || !menu_back_action.contains(ActionEvents::START) {
         return;
     }
 
@@ -1122,7 +1154,7 @@ fn inherit_scene_owner_to_generated_menu_ui(
 }
 
 fn close_on_escape(
-    keyboard: Res<ButtonInput<KeyCode>>,
+    menu_back_action: Single<&ActionEvents, With<Action<FoundationMenuBack>>>,
     settings: Res<FoundationMenuRuntimeSettings>,
     scene_stack: Option<Res<SceneStack>>,
     close_markers: CloseOnEscapeQuery,
@@ -1130,7 +1162,7 @@ fn close_on_escape(
     mut pause_state: ResMut<FoundationPauseState>,
     mut scene_commands: MessageWriter<SceneCommand>,
 ) {
-    if !keyboard.just_pressed(KeyCode::Escape) {
+    if !menu_back_action.contains(ActionEvents::START) {
         return;
     }
 
@@ -1273,6 +1305,11 @@ mod tests {
         app.init_resource::<Assets<StandardMaterial>>();
         app.add_plugins(crate::scene_stack::FoundationSceneStackPlugin);
         app.add_plugins(FoundationMenuPlugin);
+        // `bevy_enhanced_input` finishes context setup in `Plugin::finish`, which
+        // only runs automatically through `App::run()`. Tests that drive the app
+        // with bare `update()` calls must invoke it manually first.
+        app.finish();
+        app.cleanup();
         app.world_mut()
             .write_message(SceneCommand::open(SceneSource::runtime("gameplay")));
         app.world_mut()
@@ -1318,6 +1355,11 @@ mod tests {
         app.init_resource::<Assets<StandardMaterial>>();
         app.add_plugins(crate::scene_stack::FoundationSceneStackPlugin);
         app.add_plugins(FoundationMenuPlugin);
+        // `bevy_enhanced_input` finishes context setup in `Plugin::finish`, which
+        // only runs automatically through `App::run()`. Tests that drive the app
+        // with bare `update()` calls must invoke it manually first.
+        app.finish();
+        app.cleanup();
         app.world_mut()
             .write_message(SceneCommand::open(SceneSource::runtime("gameplay")));
         app.update();
@@ -1381,6 +1423,11 @@ mod tests {
         app.init_resource::<Assets<StandardMaterial>>();
         app.add_plugins(crate::scene_stack::FoundationSceneStackPlugin);
         app.add_plugins(FoundationMenuPlugin);
+        // `bevy_enhanced_input` finishes context setup in `Plugin::finish`, which
+        // only runs automatically through `App::run()`. Tests that drive the app
+        // with bare `update()` calls must invoke it manually first.
+        app.finish();
+        app.cleanup();
         app.world_mut()
             .write_message(SceneCommand::open(SceneSource::runtime("menu-a")));
         app.world_mut()
