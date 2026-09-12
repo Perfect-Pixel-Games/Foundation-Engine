@@ -19,13 +19,10 @@ use crate::{
     },
 };
 use bevy::{
-    input::{
-        keyboard::Key,
-        mouse::{MouseScrollUnit, MouseWheel},
-    },
     prelude::*,
     text::{EditableText, TextCursorStyle, TextEdit, TextLayout},
 };
+use bevy_enhanced_input::prelude::*;
 use bevy_feathers::FeathersPlugins;
 use bevy_input_focus::{
     tab_navigation::{TabGroup, TabIndex},
@@ -67,7 +64,13 @@ impl Plugin for FoundationConsolePlugin {
             app.add_plugins(FeathersPlugins);
         }
 
-        app.init_resource::<FoundationConsoleState>()
+        // Enhanced input must exist before `add_input_context` runs, and this
+        // plugin is also used on its own in tests that skip `FoundationPlugin`.
+        crate::add_enhanced_input_plugin_if_missing(app);
+
+        app.add_input_context::<FoundationConsoleControlsInput>()
+            .add_systems(Startup, spawn_foundation_console_controls_input_context)
+            .init_resource::<FoundationConsoleState>()
             .insert_resource(FoundationConsoleHistory::load_from_disk())
             .init_resource::<FoundationConsoleRegistry>()
             .init_resource::<FoundationConsoleUiState>()
@@ -95,6 +98,101 @@ impl Plugin for FoundationConsolePlugin {
                     .chain(),
             );
     }
+}
+
+/// Reusable input context for Foundation debug-console control keys and
+/// scrolling.
+///
+/// Named `*ControlsInput` (not `*Input`) to avoid colliding with
+/// [`FoundationConsoleInput`], the pre-existing marker component for the
+/// console's editable text-input entity.
+///
+/// Spawned once by [`spawn_foundation_console_controls_input_context`]; games
+/// never need to spawn or configure this themselves.
+#[derive(Component, Default)]
+pub struct FoundationConsoleControlsInput;
+
+/// Opens/closes the debug console overlay. Bound to the backquote/backtick key.
+#[derive(InputAction)]
+#[action_output(bool)]
+pub struct FoundationConsoleToggle;
+
+/// Closes the debug console overlay from within [`handle_console_keyboard_actions`].
+///
+/// Bound to the same physical `Escape` key as [`crate::menu::FoundationMenuBack`]
+/// and [`crate::splash_screen::FoundationSplashScreenSkip`]; `consume_input`
+/// defaults to `false` in `bevy_enhanced_input`, so all three keep triggering
+/// independently from a single Escape press.
+#[derive(InputAction)]
+#[action_output(bool)]
+pub struct FoundationConsoleClose;
+
+/// Autocompletes the current console input. Bound to Tab.
+#[derive(InputAction)]
+#[action_output(bool)]
+pub struct FoundationConsoleAutocomplete;
+
+/// Recalls the previous console history entry. Bound to the up arrow.
+#[derive(InputAction)]
+#[action_output(bool)]
+pub struct FoundationConsoleHistoryPrevious;
+
+/// Recalls the next console history entry. Bound to the down arrow.
+#[derive(InputAction)]
+#[action_output(bool)]
+pub struct FoundationConsoleHistoryNext;
+
+/// Submits the current console input as a command. Bound to Enter.
+#[derive(InputAction)]
+#[action_output(bool)]
+pub struct FoundationConsoleSubmit;
+
+/// Scrolls the console output/prediction popup. Bound to the mouse wheel.
+///
+/// `bevy_enhanced_input` normalizes pixel-unit wheel deltas into line-unit
+/// equivalents itself (see `Binding::MouseWheel` in the crate source), using a
+/// different constant than this module's previous hand-rolled
+/// `MouseScrollUnit::Pixel` multiplier. Scroll sensitivity for pixel-based
+/// input devices may feel slightly different as a result; line-unit devices
+/// (the common case) are unaffected.
+#[derive(InputAction)]
+#[action_output(Vec2)]
+pub struct FoundationConsoleScroll;
+
+fn spawn_foundation_console_controls_input_context(mut commands: Commands) {
+    commands.spawn((
+        FoundationConsoleControlsInput,
+        actions!(FoundationConsoleControlsInput[
+            (
+                Action::<FoundationConsoleToggle>::new(),
+                bindings![KeyCode::Backquote],
+            ),
+            (
+                Action::<FoundationConsoleClose>::new(),
+                bindings![KeyCode::Escape],
+            ),
+            (
+                Action::<FoundationConsoleAutocomplete>::new(),
+                bindings![KeyCode::Tab],
+            ),
+            (
+                Action::<FoundationConsoleHistoryPrevious>::new(),
+                bindings![KeyCode::ArrowUp],
+            ),
+            (
+                Action::<FoundationConsoleHistoryNext>::new(),
+                bindings![KeyCode::ArrowDown],
+            ),
+            (
+                Action::<FoundationConsoleSubmit>::new(),
+                bindings![KeyCode::Enter],
+            ),
+            (
+                Action::<FoundationConsoleScroll>::new(),
+                bindings![Binding::mouse_wheel()],
+            ),
+        ]),
+    ));
 }
 
 /// Runtime open/closed state for the Foundation debug console.
@@ -269,11 +367,11 @@ fn history_file_path_for_executable(executable_path: Option<&Path>) -> PathBuf {
 }
 
 fn toggle_console_scene(
-    keyboard_input: Res<ButtonInput<KeyCode>>,
+    console_toggle_action: Single<&ActionEvents, With<Action<FoundationConsoleToggle>>>,
     console_state: Res<FoundationConsoleState>,
     mut scene_commands: MessageWriter<SceneCommand>,
 ) {
-    if !keyboard_input.just_pressed(KeyCode::Backquote) {
+    if !console_toggle_action.contains(ActionEvents::START) {
         return;
     }
 
@@ -363,7 +461,11 @@ fn update_console_input_state(
 
 #[allow(clippy::too_many_arguments)]
 fn handle_console_keyboard_actions(
-    keyboard_input: Res<ButtonInput<Key>>,
+    close_action: Single<&ActionEvents, With<Action<FoundationConsoleClose>>>,
+    autocomplete_action: Single<&ActionEvents, With<Action<FoundationConsoleAutocomplete>>>,
+    history_previous_action: Single<&ActionEvents, With<Action<FoundationConsoleHistoryPrevious>>>,
+    history_next_action: Single<&ActionEvents, With<Action<FoundationConsoleHistoryNext>>>,
+    submit_action: Single<&ActionEvents, With<Action<FoundationConsoleSubmit>>>,
     input_focus: Res<InputFocus>,
     mut commands: Commands,
     mut console_ui_state: ResMut<FoundationConsoleUiState>,
@@ -380,13 +482,13 @@ fn handle_console_keyboard_actions(
         return;
     }
 
-    if keyboard_input.just_pressed(Key::Escape) {
+    if close_action.contains(ActionEvents::START) {
         let console_scene_key = SceneKey::new(FOUNDATION_CONSOLE_SCENE_KEY);
         scene_commands.write(SceneCommand::Close(SceneTarget::Key(console_scene_key)));
         return;
     }
 
-    if keyboard_input.just_pressed(Key::Tab) {
+    if autocomplete_action.contains(ActionEvents::START) {
         let bsn_scene_registry = bsn_scene_registry.as_deref();
         if let Some(completed_input) = autocomplete_console_input(
             &console_ui_state.input,
@@ -399,7 +501,7 @@ fn handle_console_keyboard_actions(
         return;
     }
 
-    if keyboard_input.just_pressed(Key::ArrowUp) {
+    if history_previous_action.contains(ActionEvents::START) {
         if let Some(history_input) = previous_history_input(&mut console_ui_state, &console_history)
         {
             replace_console_input(&mut editable_text, &history_input);
@@ -408,14 +510,14 @@ fn handle_console_keyboard_actions(
         return;
     }
 
-    if keyboard_input.just_pressed(Key::ArrowDown) {
+    if history_next_action.contains(ActionEvents::START) {
         let history_input = next_history_input(&mut console_ui_state, &console_history);
         replace_console_input(&mut editable_text, &history_input);
         console_ui_state.input = history_input;
         return;
     }
 
-    if keyboard_input.just_pressed(Key::Enter) {
+    if submit_action.contains(ActionEvents::START) {
         let submitted_command_line = console_ui_state.input.trim().to_string();
         if submitted_command_line.is_empty() {
             return;
@@ -667,25 +769,20 @@ fn console_preview_is_open(
 }
 
 fn scroll_console_output(
-    mut mouse_wheel_messages: MessageReader<MouseWheel>,
+    console_scroll_action: Single<&Action<FoundationConsoleScroll>>,
     console_state: Res<FoundationConsoleState>,
     mut console_ui_state: ResMut<FoundationConsoleUiState>,
     suggestion_visibilities: Query<&Visibility, With<FoundationConsoleSuggestion>>,
     mut suggestion_scroll_positions: Query<&mut ScrollPosition, With<FoundationConsoleSuggestion>>,
 ) {
     if !console_state.is_open {
-        mouse_wheel_messages.clear();
         return;
     }
 
-    let mut scroll_steps: i32 = 0;
-    for mouse_wheel in mouse_wheel_messages.read() {
-        let unit_multiplier = match mouse_wheel.unit {
-            MouseScrollUnit::Line => 1.0,
-            MouseScrollUnit::Pixel => 0.05,
-        };
-        scroll_steps += (mouse_wheel.y * unit_multiplier).round() as i32;
-    }
+    // `FoundationConsoleScroll`'s value is already this frame's accumulated,
+    // unit-normalized wheel delta (see the action's doc comment), so no
+    // per-message unit handling is needed here unlike the pre-migration code.
+    let scroll_steps = console_scroll_action.y.round() as i32;
 
     if scroll_steps == 0 {
         return;

@@ -17,6 +17,7 @@ dev-tools = [
 
 [dependencies]
 bevy.workspace = true
+bevy_enhanced_input.workspace = true
 bevy_feathers = { workspace = true, optional = true }
 bevy_input_focus = { workspace = true, optional = true }
 foundation-console-macros = { workspace = true, optional = true }
