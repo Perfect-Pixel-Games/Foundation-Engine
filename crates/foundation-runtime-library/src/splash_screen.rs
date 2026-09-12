@@ -9,10 +9,40 @@ use crate::scene_stack::{
     OpenSceneOptions, SceneCommand, SceneLoadMode, SceneOwner, ScenePresentation, SceneSource,
 };
 use bevy::prelude::*;
+use bevy_enhanced_input::prelude::*;
 
 /// Installs reusable Foundation splash-screen types and systems.
 #[derive(Default)]
 pub struct FoundationSplashScreenPlugin;
+
+/// Reusable input context for Foundation's splash-screen skip behavior.
+///
+/// Spawned once by [`spawn_foundation_splash_screen_input_context`]; games
+/// never need to spawn or configure this themselves.
+#[derive(Component, Default)]
+pub struct FoundationSplashScreenInput;
+
+/// Skip action read by [`advance_splash_screens`].
+///
+/// Bound to the same `Escape` key as [`crate::menu::FoundationMenuBack`] and
+/// any future console-close action; `consume_input` defaults to `false` in
+/// `bevy_enhanced_input`, so all three keep triggering independently from a
+/// single Escape press, matching the pre-migration `just_pressed` behavior.
+#[derive(InputAction)]
+#[action_output(bool)]
+pub struct FoundationSplashScreenSkip;
+
+fn spawn_foundation_splash_screen_input_context(mut commands: Commands) {
+    commands.spawn((
+        FoundationSplashScreenInput,
+        actions!(FoundationSplashScreenInput[
+            (
+                Action::<FoundationSplashScreenSkip>::new(),
+                bindings![KeyCode::Escape],
+            ),
+        ]),
+    ));
+}
 
 /// Optional UI camera target for generated splash UI.
 ///
@@ -73,8 +103,14 @@ impl Default for FoundationSplashRuntimeSettings {
 
 impl Plugin for FoundationSplashScreenPlugin {
     fn build(&self, app: &mut App) {
+        // Enhanced input must exist before `add_input_context` runs, and this
+        // plugin is also used on its own in tests that skip `FoundationPlugin`.
+        crate::add_enhanced_input_plugin_if_missing(app);
+
         // Runtime settings gate splash behavior for standalone and editor integrations.
-        app.init_resource::<FoundationSplashRuntimeSettings>()
+        app.add_input_context::<FoundationSplashScreenInput>()
+            .add_systems(Startup, spawn_foundation_splash_screen_input_context)
+            .init_resource::<FoundationSplashRuntimeSettings>()
             .register_type::<FoundationSplashScreen>()
             .register_type::<FoundationSplashTimings>()
             .register_type::<FoundationSplashUiRoot>()
@@ -408,7 +444,7 @@ fn safe_add_child(commands: &mut Commands, parent_entity: Entity, child_entity: 
 fn advance_splash_screens(
     mut commands: Commands,
     time: Res<Time>,
-    keyboard: Res<ButtonInput<KeyCode>>,
+    splash_skip_action: Single<&ActionEvents, With<Action<FoundationSplashScreenSkip>>>,
     mut splashes: Query<(&FoundationSplashScreen, &mut FoundationSplashRuntime)>,
     mut text_colors: Query<&mut TextColor>,
     mut scene_commands: MessageWriter<SceneCommand>,
@@ -421,7 +457,7 @@ fn advance_splash_screens(
         // Advance a local phase copy before writing back to avoid partial runtime updates.
         let mut phase = runtime.phase;
         let mut phase_elapsed = runtime.phase_elapsed + time.delta_secs();
-        let alpha = if splash_skip_requested(&keyboard) {
+        let alpha = if splash_skip_requested(&splash_skip_action) {
             // Escape is a direct cutscene skip, so jump to the same completion path
             // the timed fade-out would eventually reach.
             phase = SplashPhase::Complete;
@@ -450,8 +486,8 @@ fn advance_splash_screens(
     }
 }
 
-fn splash_skip_requested(keyboard: &ButtonInput<KeyCode>) -> bool {
-    keyboard.just_pressed(KeyCode::Escape)
+fn splash_skip_requested(splash_skip_action: &ActionEvents) -> bool {
+    splash_skip_action.contains(ActionEvents::START)
 }
 
 fn advance_phase(
@@ -585,10 +621,41 @@ mod tests {
 
     #[test]
     fn escape_key_requests_splash_skip() {
-        let mut keyboard = ButtonInput::<KeyCode>::default();
-        assert!(!splash_skip_requested(&keyboard));
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.init_resource::<ButtonInput<KeyCode>>();
+        // `advance_splash_screens` writes `SceneCommand`, which the full
+        // `FoundationSceneStackPlugin` normally registers; this test only needs
+        // the message type to exist, not the whole scene stack.
+        app.add_message::<SceneCommand>();
+        app.add_plugins(FoundationSplashScreenPlugin);
+        // `bevy_enhanced_input` finishes context setup in `Plugin::finish`, which
+        // only runs automatically through `App::run()`. Tests that drive the app
+        // with bare `update()` calls must invoke it manually first.
+        app.finish();
+        app.cleanup();
+        // The Startup schedule spawns the skip action's context/binding entities.
+        app.update();
 
-        keyboard.press(KeyCode::Escape);
-        assert!(splash_skip_requested(&keyboard));
+        let skip_action_entity = app
+            .world_mut()
+            .query_filtered::<Entity, With<Action<FoundationSplashScreenSkip>>>()
+            .single(app.world())
+            .expect("splash-screen skip action should be spawned by Startup");
+        let skip_action_started = |app: &App| {
+            app.world()
+                .get::<ActionEvents>(skip_action_entity)
+                .expect("skip action should have ActionEvents")
+                .contains(ActionEvents::START)
+        };
+
+        assert!(!skip_action_started(&app));
+
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Escape);
+        app.update();
+
+        assert!(skip_action_started(&app));
     }
 }
