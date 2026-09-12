@@ -11,6 +11,8 @@ use std::f32::consts::FRAC_PI_2;
 use bevy::prelude::*;
 use bevy_enhanced_input::prelude::*;
 
+use crate::menu::{foundation_is_not_paused, FoundationPauseState};
+
 /// Keeps the camera from pitching perfectly vertical, which would make yaw
 /// direction ambiguous (gimbal lock at the poles).
 const FOUNDATION_FREE_FLY_CAMERA_PITCH_LIMIT_MARGIN: f32 = 0.01;
@@ -19,7 +21,10 @@ const FOUNDATION_FREE_FLY_CAMERA_PITCH_LIMIT_MARGIN: f32 = 0.01;
 ///
 /// Opt-in: add this plugin only to games or scenes that want a free-fly
 /// camera available, then spawn a camera entity using
-/// [`foundation_free_fly_camera_bundle`].
+/// [`foundation_free_fly_camera_bundle`]. Movement stops while
+/// [`crate::menu::FoundationPauseState`] reports the game as paused, matching
+/// how other Foundation-owned per-frame systems (e.g. `spin_foundation_entities`
+/// in `menu.rs`) already respect pause.
 #[derive(Default)]
 pub struct FoundationFreeFlyCameraPlugin;
 
@@ -29,8 +34,15 @@ impl Plugin for FoundationFreeFlyCameraPlugin {
         // plugin is also used on its own in tests that skip `FoundationPlugin`.
         crate::add_enhanced_input_plugin_if_missing(app);
 
-        app.add_input_context::<FoundationFreeFlyCameraInput>()
-            .add_systems(Update, move_foundation_free_fly_cameras);
+        // `run_if(foundation_is_not_paused)` needs this resource to exist even
+        // if `FoundationMenuPlugin` (which also initializes it) isn't present;
+        // `init_resource` is a no-op if it's already there.
+        app.init_resource::<FoundationPauseState>()
+            .add_input_context::<FoundationFreeFlyCameraInput>()
+            .add_systems(
+                Update,
+                move_foundation_free_fly_cameras.run_if(foundation_is_not_paused),
+            );
     }
 }
 
@@ -243,6 +255,29 @@ mod tests {
         );
         assert!(camera_transform.translation.x.abs() < 0.0001);
         assert!(camera_transform.translation.y.abs() < 0.01);
+    }
+
+    #[test]
+    fn pausing_stops_camera_movement() {
+        let (mut app, free_fly_camera_entity) = test_app_with_free_fly_camera();
+
+        app.world_mut()
+            .resource_mut::<FoundationPauseState>()
+            .paused = true;
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyW);
+        app.update();
+
+        let camera_transform = app
+            .world()
+            .get::<Transform>(free_fly_camera_entity)
+            .expect("free-fly camera should have a Transform");
+        assert_eq!(
+            camera_transform.translation,
+            Vec3::ZERO,
+            "camera should not move while Foundation gameplay is paused"
+        );
     }
 
     #[test]
