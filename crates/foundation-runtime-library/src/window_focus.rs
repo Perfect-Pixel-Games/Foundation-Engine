@@ -13,8 +13,7 @@
 //! OS's foreground-lock heuristic); this module calls it as soon as the OS
 //! window is actually showing.
 
-use bevy::prelude::*;
-use bevy::winit::WinitWindows;
+use bevy::{ecs::system::NonSendMarker, prelude::*, winit::WINIT_WINDOWS};
 
 /// How many consecutive frames [`force_window_focus_once_visible`] calls
 /// `winit_window.focus_window()` after the OS window first reports itself
@@ -48,47 +47,51 @@ impl Plugin for FoundationWindowFocusPlugin {
 /// when the window is already visible. This waits for
 /// `winit_window.is_visible() == Some(true)` before calling it.
 ///
-/// This deliberately does *not* stop early once Bevy's `Window::focused`
-/// looks true: that field defaults to `true` at spawn (it records the
-/// *desired* state, not a confirmed OS event) and never flips if the window
-/// opens unfocused and simply stays that way, since no real
-/// focus-lost transition ever fires to correct it. Treating it as a
-/// "already succeeded" signal made the previous version of this system
-/// silently skip every attempt. Instead this always spends its full attempt
+/// This deliberately does not stop early once Bevy's `Window::focused` looks
+/// true: that field defaults to `true` at spawn (it records the *desired*
+/// state, not a confirmed OS event) and never flips if the window opens
+/// unfocused and simply stays that way, since no real focus-lost transition
+/// ever fires to correct it. Instead this always spends its full attempt
 /// budget the first few frames the window is visible, which is cheap and
 /// harmless if the window was already focused (`focus_window()` itself is a
 /// no-op in that case).
 ///
-/// `WinitWindows` is a `NonSend` resource that only exists once
-/// `bevy_winit`'s plugin has installed a real event loop, so this is
-/// `Option`-wrapped to stay a no-op in headless test apps that only add
-/// `MinimalPlugins`.
+/// Unlike older Bevy versions, `bevy_winit` 0.19 does not expose
+/// `WinitWindows` as an ECS resource at all -- it's kept in the
+/// [`WINIT_WINDOWS`] thread-local instead (see that item's docs), populated
+/// only on the thread running the winit event loop. `NonSendMarker` forces
+/// this system onto that same thread, matching the pattern
+/// `bevy_winit`'s own internal systems (e.g. `changed_windows`) use to
+/// access it safely.
 fn force_window_focus_once_visible(
     mut attempts_remaining: Local<Option<u8>>,
     windows: Query<Entity, With<Window>>,
-    winit_windows: Option<NonSend<WinitWindows>>,
+    _non_send_marker: NonSendMarker,
 ) {
     let remaining = attempts_remaining.get_or_insert(MAX_FOCUS_ATTEMPTS);
     if *remaining == 0 {
         return;
     }
-
-    let Some(winit_windows) = winit_windows else {
-        return;
-    };
     let Some(window_entity) = windows.iter().next() else {
         return;
     };
-    let Some(winit_window) = winit_windows.get_window(window_entity) else {
-        return;
-    };
-    if winit_window.is_visible() != Some(true) {
-        // Not showing yet -- don't spend an attempt on a guaranteed no-op.
-        return;
-    }
 
-    winit_window.focus_window();
-    *remaining -= 1;
+    let focus_attempted = WINIT_WINDOWS.with_borrow(|winit_windows| {
+        let Some(winit_window) = winit_windows.get_window(window_entity) else {
+            return false;
+        };
+        if winit_window.is_visible() != Some(true) {
+            // Not showing yet -- don't spend an attempt on a guaranteed no-op.
+            return false;
+        }
+
+        winit_window.focus_window();
+        true
+    });
+
+    if focus_attempted {
+        *remaining -= 1;
+    }
 }
 
 #[cfg(test)]
@@ -96,10 +99,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn does_nothing_without_a_windowing_backend() {
-        // `MinimalPlugins` never inserts `WinitWindows`, matching how
-        // Foundation's other headless tests exercise `FoundationPlugin`.
-        // This should not panic despite the missing `NonSend` resource.
+    fn does_nothing_without_a_real_os_window() {
+        // `MinimalPlugins` never drives a real winit event loop, so
+        // `WINIT_WINDOWS` stays at its empty default on this thread. This
+        // should not panic despite there being no OS window to find.
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.world_mut().spawn(Window::default());
