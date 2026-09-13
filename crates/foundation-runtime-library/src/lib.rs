@@ -32,6 +32,7 @@ pub mod scene_stack;
 pub mod splash_screen;
 pub mod startup_scene;
 pub mod ui_theme;
+pub mod window_focus;
 
 /// Adds [`EnhancedInputPlugin`] to `app` unless a previous plugin already did.
 ///
@@ -69,6 +70,7 @@ impl Plugin for FoundationPlugin {
             menu::FoundationMenuPlugin,
             credits::FoundationCreditsPlugin,
             ui_theme::FoundationUiThemePlugin,
+            window_focus::FoundationWindowFocusPlugin,
         ))
         // Keep common settings and actors visible to the editor and reflection tests.
         .register_type::<game_settings::FoundationGameSettings>()
@@ -216,6 +218,7 @@ pub mod prelude {
         FoundationUiThemedGap, FoundationUiThemedPadding, FoundationUiThemedText,
         FoundationUiThemedTypography, FoundationUiTypographyToken,
     };
+    pub use crate::window_focus::FoundationWindowFocusPlugin;
     #[cfg(feature = "dev-tools")]
     pub use crate::{console_command, ConsoleCommandInput};
     pub use crate::{FoundationActor, FoundationPlugin, FoundationSettings};
