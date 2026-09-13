@@ -23,7 +23,6 @@ lalrpop_util::lalrpop_mod!(
     #[allow(clippy::vec_init_then_push)]
     dynamic_bsn_grammar
 );
-pub mod free_fly_camera;
 pub mod game_settings;
 pub mod logging;
 pub mod menu;
@@ -33,16 +32,18 @@ pub mod scene_stack;
 pub mod splash_screen;
 pub mod startup_scene;
 pub mod ui_theme;
+pub mod window_focus;
 
 /// Adds [`EnhancedInputPlugin`] to `app` unless a previous plugin already did.
 ///
-/// Foundation's input-context plugins (menu, splash screen, console, free-fly
-/// camera) each depend on `bevy_enhanced_input` being installed, and each is
-/// also usable on its own in tests that do not add the full
-/// [`FoundationPlugin`]. Bevy panics if the same plugin type is added twice,
-/// so every call site that needs `EnhancedInputPlugin` must go through this
-/// guard instead of calling `app.add_plugins(EnhancedInputPlugin)` directly.
-pub(crate) fn add_enhanced_input_plugin_if_missing(app: &mut App) {
+/// Foundation's input-context plugins (menu, splash screen, console) each
+/// depend on `bevy_enhanced_input` being installed, and each is also usable
+/// on its own in tests that do not add the full [`FoundationPlugin`]. Bevy
+/// panics if the same plugin type is added twice, so every call site that
+/// needs `EnhancedInputPlugin` must go through this guard instead of calling
+/// `app.add_plugins(EnhancedInputPlugin)` directly. Game-owned input-context
+/// plugins (e.g. a project's own free-fly camera) should use this too.
+pub fn add_enhanced_input_plugin_if_missing(app: &mut App) {
     if !app.is_plugin_added::<EnhancedInputPlugin>() {
         app.add_plugins(EnhancedInputPlugin);
     }
@@ -69,6 +70,7 @@ impl Plugin for FoundationPlugin {
             menu::FoundationMenuPlugin,
             credits::FoundationCreditsPlugin,
             ui_theme::FoundationUiThemePlugin,
+            window_focus::FoundationWindowFocusPlugin,
         ))
         // Keep common settings and actors visible to the editor and reflection tests.
         .register_type::<game_settings::FoundationGameSettings>()
@@ -148,6 +150,7 @@ pub struct FoundationActor {
 
 /// Common imports for games using FoundationRuntimeLibrary.
 pub mod prelude {
+    pub use crate::add_enhanced_input_plugin_if_missing;
     pub use crate::bsn_assets::{
         apply_pending_bsn_instances, propagate_loaded_bsn_scene_owners, FoundationBsnAssetPlugin,
         FoundationBsnCommandsExt, FoundationBsnInstance, FoundationBsnSceneRegistry,
@@ -166,11 +169,6 @@ pub mod prelude {
         CreditsDocument, CreditsGroup, FoundationCreditsAssetRoots, FoundationCreditsPlugin,
         FoundationCreditsRoll, FoundationCreditsRuntime, FoundationCreditsRuntimeSettings,
         FoundationGeneratedCreditsUi,
-    };
-    pub use crate::free_fly_camera::{
-        foundation_free_fly_camera_bundle, FoundationFreeFlyCameraInput,
-        FoundationFreeFlyCameraOrientation, FoundationFreeFlyCameraPlugin,
-        FoundationFreeFlyCameraSettings,
     };
     pub use crate::game_settings::{
         FoundationGameSettings, FoundationGameSettingsIoError, FOUNDATION_GAME_SETTINGS_FILE_NAME,
@@ -220,6 +218,7 @@ pub mod prelude {
         FoundationUiThemedGap, FoundationUiThemedPadding, FoundationUiThemedText,
         FoundationUiThemedTypography, FoundationUiTypographyToken,
     };
+    pub use crate::window_focus::FoundationWindowFocusPlugin;
     #[cfg(feature = "dev-tools")]
     pub use crate::{console_command, ConsoleCommandInput};
     pub use crate::{FoundationActor, FoundationPlugin, FoundationSettings};
