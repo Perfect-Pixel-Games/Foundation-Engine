@@ -28,6 +28,7 @@ pub mod logging;
 pub mod menu;
 #[cfg(feature = "dev-tools")]
 pub mod perf_overlay;
+pub mod physics;
 pub mod scene_stack;
 pub mod splash_screen;
 pub mod startup_scene;
@@ -71,6 +72,7 @@ impl Plugin for FoundationPlugin {
             credits::FoundationCreditsPlugin,
             ui_theme::FoundationUiThemePlugin,
             window_focus::FoundationWindowFocusPlugin,
+            physics::FoundationPhysicsPlugin,
         ))
         // Keep common settings and actors visible to the editor and reflection tests.
         .register_type::<game_settings::FoundationGameSettings>()
@@ -190,6 +192,7 @@ pub mod prelude {
     };
     #[cfg(feature = "dev-tools")]
     pub use crate::perf_overlay::{FoundationPerfOverlayPlugin, FoundationPerfOverlayState};
+    pub use crate::physics::FoundationPhysicsPlugin;
     pub use crate::scene_stack::{
         FoundationSceneStackPlugin, OpenSceneOptions, SceneAdded, SceneCommand, SceneCommandsExt,
         SceneContentLoading, SceneFocused, SceneId, SceneKey, SceneLoadMode, SceneLoadRequested,
