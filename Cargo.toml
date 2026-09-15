@@ -15,7 +15,11 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [workspace.dependencies]
-avian3d = "0.7"
+# Pinned to an unreleased commit (not the published 0.7.0) because 0.7.0 has
+# an internal island/contact-bookkeeping panic on real ground contact with a
+# compound rigid body -- this commit is the first on avian's main branch
+# confirmed to fix it. Re-verify before ever moving this pin.
+avian3d = { git = "https://github.com/avianphysics/avian", rev = "47d5948b2a8ee829848fbc3d4ce5e44ad0fd863f" }
 bevy = { version = "0.19.0", features = [
     "file_watcher",
     "reflect_documentation",
